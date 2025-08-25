@@ -11,7 +11,7 @@ import traceback
 from typing import Final
 import uuid
 from telegram import Update, User, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext, CallbackQueryHandler, ConversationHandler
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext, CallbackQueryHandler, ConversationHandler, JobQueue
 from telegram.constants import ChatMemberStatus
 
 # =========================
@@ -936,7 +936,8 @@ if __name__ == '__main__':
         # Schedule the periodic job using the job queue (every hour)
         app.job_queue.run_repeating(periodic_inactive_check_job, interval=3600, first=10)
 
-    app = Application.builder().token(TOKEN).post_init(on_startup).build()
+    job_queue = JobQueue()
+    app = Application.builder().token(TOKEN).post_init(on_startup).job_queue(job_queue).build()
 
     #Commands
     # Register all commands using the new helper
