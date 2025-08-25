@@ -229,7 +229,7 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Find users who were admin in this group but are no longer
     removed_admins = []
-    for user_id, groups in list(admin_data.items()): # Use list to allow modification during iteration
+    for user_id, groups in list(admin_data.items()):  # Use list to allow modification during iteration
         if group_id in groups and user_id not in current_admin_ids:
             groups.remove(group_id)
             removed_admins.append(user_id)
@@ -251,12 +251,15 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_admin_data(admin_data)
 
     # Build and send confirmation message
-    message = "✅ Admin list updated for this group.\\n"
+    message_parts = ["✅ Admin list updated for this group."]
     if added_admins:
-        message += f"➕ Added {len(added_admins)} admin(s).\\n"
+        message_parts.append(f"➕ Added {len(added_admins)} admin(s).")
     if removed_admins:
-        message += f"➖ Removed {len(removed_admins)} admin(s).\\n"
+        message_parts.append(f"➖ Removed {len(removed_admins)} admin(s).")
+    if not added_admins and not removed_admins:
+        message_parts.append("No changes were needed.")
 
+    message = "\n".join(message_parts)
     await context.bot.send_message(chat_id=update.effective_chat.id, text=message)
 
 
