@@ -200,66 +200,121 @@ async def removenickname_command(update: Update, context: ContextTypes.DEFAULT_T
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text="This user does not have a nickname set.")
 
+
+@command_handler_wrapper(admin_only=True)
+async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /update (admin only): Scans the group for admins and updates the global admin list.
+    """
+    chat = update.effective_chat
+    if chat.type not in ['group', 'supergroup']:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="This command can only be used in a group chat.")
+        return
+
+    group_id = str(chat.id)
+    logger.info(f"Running /update command in group {group_id}...")
+
+    # Get current admins from Telegram
+    try:
+        current_admins = await context.bot.get_chat_administrators(chat.id)
+        current_admin_ids = {str(admin.user.id) for admin in current_admins}
+        logger.debug(f"Current admins in group {group_id}: {current_admin_ids}")
+    except Exception as e:
+        logger.error(f"Failed to get admins for group {group_id}: {e}")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Error: Could not retrieve the list of administrators for this group.")
+        return
+
+    # Load existing admin data
+    admin_data = load_admin_data()
+
+    # Find users who were admin in this group but are no longer
+    removed_admins = []
+    for user_id, groups in list(admin_data.items()): # Use list to allow modification during iteration
+        if group_id in groups and user_id not in current_admin_ids:
+            groups.remove(group_id)
+            removed_admins.append(user_id)
+            logger.info(f"User {user_id} is no longer an admin in group {group_id}.")
+
+    # Add new admins
+    added_admins = []
+    for user_id in current_admin_ids:
+        if user_id not in admin_data:
+            admin_data[user_id] = [group_id]
+            added_admins.append(user_id)
+            logger.info(f"User {user_id} is a new global admin, added from group {group_id}.")
+        elif group_id not in admin_data[user_id]:
+            admin_data[user_id].append(group_id)
+            added_admins.append(user_id)
+            logger.info(f"User {user_id} is now also an admin in group {group_id}.")
+
+    # Save the updated data
+    save_admin_data(admin_data)
+
+    # Build and send confirmation message
+    message = "✅ Admin list updated for this group.\\n"
+    if added_admins:
+        message += f"➕ Added {len(added_admins)} admin(s).\\n"
+    if removed_admins:
+        message += f"➖ Removed {len(removed_admins)} admin(s).\\n"
+
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=message)
+
+
 def load_admin_data():
-    """Load admin and owner data from file. Ensures owner is always in admin list."""
+    """Load admin data from file."""
     if os.path.exists(ADMIN_DATA_FILE):
         with open(ADMIN_DATA_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            # Always ensure owner is in admin list
-            if str(OWNER_ID) not in data.get('admins', []):
-                data['admins'] = list(set(data.get('admins', []) + [str(OWNER_ID)]))
-            data['owner'] = str(OWNER_ID)
-            logger.debug(f"Loaded admin data: {data}")
-            return data
-    # Default: owner is admin
-    logger.debug("No admin data file found, using default owner as admin.")
-    return {'owner': str(OWNER_ID), 'admins': [str(OWNER_ID)]}
+            try:
+                data = json.load(f)
+                if not isinstance(data, dict):
+                    logger.warning("Admin data file is not a dictionary, returning empty.")
+                    return {}
+                return data
+            except json.JSONDecodeError:
+                logger.warning("Failed to decode admin data file, returning empty.")
+                return {}
+    return {}
 
 def save_admin_data(data):
-    """Save admin and owner data to file. Ensures owner is always in admin list."""
-    # Always ensure owner is in admin list
-    if str(data['owner']) not in data['admins']:
-        data['admins'].append(str(data['owner']))
+    """Save admin data to file."""
     with open(ADMIN_DATA_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     logger.debug(f"Saved admin data: {data}")
 
 def is_owner(user_id):
     """Check if the user is the owner."""
-    data = load_admin_data()
-    result = str(user_id) == str(data['owner'])
-    logger.debug(f"is_owner({user_id}) -> {result}")
-    return result
+    return str(user_id) == str(OWNER_ID)
 
 def get_display_name(user_id: int, full_name: str) -> str:
     """
-    Determines the display name for a user based on their admin status and nickname.
+    Determines the display name for a user.
+    It prioritizes nicknames, then falls back to the user's full name.
     """
     nicknames = load_admin_nicknames()
     name = nicknames.get(str(user_id))
     if name:
         return name
 
-    if not is_admin(user_id):
-        return "fag"
-
-    return full_name
+    # Fallback to the user's full name, safely escaped.
+    return html.escape(full_name)
 
 def get_capitalized_name(user_id: int, full_name: str) -> str:
     """
-    Gets the user's display name and capitalizes it correctly for use at the start of a sentence.
+    Gets the user's display name and capitalizes it.
     """
     name = get_display_name(user_id, full_name)
-    if name == "fag":
-        return "The fag"
     return name.capitalize()
 
 def is_admin(user_id):
-    """Check if the user is an admin or the owner."""
+    """Check if the user is the owner or an admin in any group."""
+    if is_owner(user_id):
+        return True
     data = load_admin_data()
-    result = str(user_id) in data['admins'] or str(user_id) == str(data['owner'])
-    logger.debug(f"is_admin({user_id}) -> {result}")
-    return result
+    user_id_str = str(user_id)
+    # Check if user_id is a key and has a non-empty list of groups
+    is_admin_result = user_id_str in data and isinstance(data.get(user_id_str), list) and len(data[user_id_str]) > 0
+    logger.debug(f"is_admin({user_id}) -> {is_admin_result}")
+    return is_admin_result
 
 async def get_user_id_by_username(context, chat_id, username) -> str:
     """Get a user's Telegram ID by their username in a chat."""
@@ -445,7 +500,7 @@ COMMAND_MAP = {
     'start': {'is_admin': False}, 'help': {'is_admin': False}, 'beowned': {'is_admin': False},
     'command': {'is_admin': False}, 'disable': {'is_admin': True}, 'admin': {'is_admin': False},
     'link': {'is_admin': True}, 'inactive': {'is_admin': True}, 'setnickname': {'is_admin': True},
-    'removenickname': {'is_admin': True}, 'enable': {'is_admin': True},
+    'removenickname': {'is_admin': True}, 'enable': {'is_admin': True}, 'update': {'is_admin': True},
 }
 
 @command_handler_wrapper(admin_only=False)
@@ -569,113 +624,86 @@ async def enable_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Command /{command_to_enable} is not currently disabled.")
 
-# Admin help request conversation state
-ADMIN_HELP_STATE = 'awaiting_admin_help_reason'
-
-# /admin command implementation
-# Any user in a group chat can use this command to request help from group admins. Only admins will receive the notification.
 @command_handler_wrapper(admin_only=False)
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Update user activity for inactivity tracking
-    if update.effective_user and update.effective_chat and update.effective_chat.type in ["group", "supergroup"]:
-        update_user_activity(update.effective_user.id, update.effective_chat.id)
-    if update.effective_chat.type == "private":
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="This command can only be used in group chats.")
-        return
-    # Check if disabled in this group
-    group_id = str(update.effective_chat.id)
-    disabled = load_disabled_commands()
-    if 'admin' in disabled.get(group_id, []):
-        return
+    """
+    /admin (as a reply): Forwards a message to the group admins for review.
+    """
     message = update.message
-    if not message:
-        return
-    # Record initial info
-    user = message.from_user
-    chat = message.chat
-    replied_message = message.reply_to_message
-    context.user_data['admin_help'] = {
-        'user_id': user.id,
-        'username': user.username,
-        'chat_id': chat.id,
-        'chat_title': getattr(chat, 'title', None),
-        'replied_message': replied_message.to_dict() if replied_message else None,
-        'reason': None
-    }
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="Please describe the reason you need admin help. Your request will be sent to all group admins.")
-    context.user_data[ADMIN_HELP_STATE] = True
+    chat = update.effective_chat
 
-
-async def admin_help_conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the user's response after using /admin."""
-    if ADMIN_HELP_STATE not in context.user_data:
+    if chat.type not in ['group', 'supergroup']:
+        await context.bot.send_message(chat_id=chat.id, text="This command can only be used in group chats.")
         return
 
-    message = update.message
-    if not message or not message.text:
+    if not message.reply_to_message:
+        await context.bot.send_message(chat_id=chat.id, text="Please use this command as a reply to the message you want to report.")
         return
 
-    reason = message.text
-    help_data = context.user_data.get('admin_help', {})
-    user_id = help_data.get('user_id')
-    user_full_name = update.effective_user.full_name
-    display_name = get_display_name(user_id, user_full_name)
-    chat_id = help_data.get('chat_id')
-    chat_title = help_data.get('chat_title')
-    replied_message = help_data.get('replied_message')
+    # Update user activity
+    if update.effective_user:
+        update_user_activity(update.effective_user.id, chat.id)
 
-    help_text = (
-        f"🚨 <b>Admin Help Request</b> 🚨\n"
-        f"<b>User:</b> {display_name} (ID: {user_id})\n"
-        f"<b>Group:</b> {chat_title} (ID: {chat_id})\n"
-        f"<b>Reason:</b> {html.escape(reason)}\n"
+    # Prepare the report
+    reporting_user = update.effective_user
+    reported_message = message.reply_to_message
+    reported_user = reported_message.from_user
+    reason = " ".join(context.args) if context.args else "No reason provided."
+
+    # Use the new get_display_name for respectful naming
+    reporting_user_display = get_display_name(reporting_user.id, reporting_user.full_name)
+    reported_user_display = get_display_name(reported_user.id, reported_user.full_name)
+
+    # Create a link to the message
+    message_link = f"https://t.me/c/{str(chat.id).replace('-100', '')}/{reported_message.message_id}"
+
+    report_text = (
+        f"🚨 <b>Admin Report</b> 🚨\n\n"
+        f"<b>Group:</b> {html.escape(chat.title)}\n"
+        f"<b>Reported by:</b> {reporting_user_display}\n"
+        f"<b>Reported user:</b> {reported_user_display}\n"
+        f"<b>Reason:</b> {html.escape(reason)}\n\n"
+        f"<a href='{message_link}'>Go to message</a>"
     )
 
-    if replied_message:
-        rep_user_data = replied_message.get('from', {})
-        rep_user_id = rep_user_data.get('id')
-        rep_user_name = get_display_name(rep_user_id, rep_user_data.get('username', 'Unknown'))
-        rep_text = replied_message.get('text', '') or replied_message.get('caption', '')
-        help_text += f"<b>Replied to:</b> {rep_user_name} (ID: {rep_user_id})\n"
-        if rep_text:
-            help_text += f"<b>Message:</b> {html.escape(rep_text)}\n"
-
-    admins = await context.bot.get_chat_administrators(chat_id)
+    # Notify admins
+    admins = await context.bot.get_chat_administrators(chat.id)
+    notification_sent = False
     for admin in admins:
+        # Don't notify the bot itself if it's an admin
+        if admin.user.is_bot:
+            continue
         try:
+            # Forward the original message first
+            await context.bot.forward_message(
+                chat_id=admin.user.id,
+                from_chat_id=chat.id,
+                message_id=reported_message.message_id
+            )
+            # Then send the report context
             await context.bot.send_message(
                 chat_id=admin.user.id,
-                text=help_text,
+                text=report_text,
                 parse_mode='HTML',
                 disable_web_page_preview=True
             )
-            if replied_message:
-                if 'photo' in replied_message and replied_message['photo']:
-                    file_id = replied_message['photo'][-1]['file_id']
-                    await context.bot.send_photo(chat_id=admin.user.id, photo=file_id, caption="[Forwarded from help request]")
-                if 'video' in replied_message and replied_message['video']:
-                    file_id = replied_message['video']['file_id']
-                    await context.bot.send_video(chat_id=admin.user.id, video=file_id, caption="[Forwarded from help request]")
-                if 'voice' in replied_message and replied_message['voice']:
-                    file_id = replied_message['voice']['file_id']
-                    await context.bot.send_voice(chat_id=admin.user.id, voice=file_id, caption="[Forwarded from help request]")
-        except Exception:
-            logger.warning(f"Failed to notify admin {admin.user.id} in help request.")
+            notification_sent = True
+        except Exception as e:
+            logger.warning(f"Failed to notify admin {admin.user.id} for report in group {chat.id}: {e}")
 
-    sent_message = await message.reply_text("Your help request has been sent to all group admins.")
-
-    # Schedule the confirmation message for deletion after 30 seconds
-    context.job_queue.run_once(
-        delete_message_callback,
-        30,
-        chat_id=sent_message.chat_id,
-        data=sent_message.message_id,
-        name=f"delete_{sent_message.chat_id}_{sent_message.message_id}"
-    )
-
-    # Clean up the conversation state
-    context.user_data.pop(ADMIN_HELP_STATE, None)
-    context.user_data.pop('admin_help', None)
+    if notification_sent:
+        # Confirm to the user that the report was sent
+        confirmation_msg = await message.reply_text("The admins have been notified.")
+        # Delete the confirmation message after a delay
+        context.job_queue.run_once(
+            delete_message_callback,
+            30,
+            chat_id=confirmation_msg.chat_id,
+            data=confirmation_msg.message_id,
+            name=f"delete_confirm_{confirmation_msg.message_id}"
+        )
+    else:
+        await message.reply_text("Could not notify any admins. Please ensure the bot has the correct permissions.")
 
 
 @command_handler_wrapper(admin_only=True)
@@ -725,22 +753,29 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Update user activity for inactivity tracking
     if update.effective_user and update.effective_chat and update.effective_chat.type in ["group", "supergroup"]:
         update_user_activity(update.effective_user.id, update.effective_chat.id)
+
+    user_mention = update.effective_user.mention_html()
+    start_message = f"Hey there {user_mention}! What can I help you with?"
+
     if update.effective_chat.type != "private":
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Please message me in private to use /start.")
         try:
             await context.bot.send_message(
                 chat_id=update.effective_user.id,
-                text='Hey there fag! What can I help you with?'
+                text=start_message,
+                parse_mode='HTML'
             )
         except Exception:
-            pass
+            logger.warning(f"Failed to send private start message to {update.effective_user.id}")
         return
+
     # Check if disabled in this group (should never trigger in private)
     group_id = str(update.effective_chat.id)
     disabled = load_disabled_commands()
     if 'start' in disabled.get(group_id, []):
         return
-    await context.bot.send_message(chat_id=update.effective_chat.id, text='Hey there fag! What can I help you with?')
+
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=start_message, parse_mode='HTML')
 
 #Help command
 @command_handler_wrapper(admin_only=False)
@@ -752,22 +787,28 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Please use the /help command in a private chat with me for a better experience.")
         return
 
+    user_id = update.effective_user.id
     keyboard = [
-        [InlineKeyboardButton("General Commands", callback_data='help_general')],
-        [InlineKeyboardButton("Admin Commands", callback_data='help_admin')],
+        [InlineKeyboardButton("General Commands", callback_data='help_general')]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
 
+    # Only show Admin Commands button to admins
+    if is_admin(user_id):
+        keyboard.append([InlineKeyboardButton("Admin Commands", callback_data='help_admin')])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
         "Welcome to the help menu! Please choose a category:",
         reply_markup=reply_markup
     )
+
 
 async def help_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles all interactions with the interactive help menu."""
     query = update.callback_query
     await query.answer()
 
+    user_id = query.from_user.id
     topic = query.data
 
     text = ""
@@ -782,18 +823,28 @@ async def help_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - /admin: Request help from admins in a group.
         """
     elif topic == 'help_admin':
-        text = """
-<b>Admin Commands</b>
-This bot has many admin commands for managing users.
-Due to Telegram limitations, I cannot know if you are an admin in a private chat.
+        if not is_admin(user_id):
+            await query.answer("You are not authorized to view this section.", show_alert=True)
+            return
 
-To see the full list of admin commands available to you in a specific group, please go to that group and use the `/command` command.
-        """
+        admin_cmds = [f"/{cmd}" for cmd, info in sorted(COMMAND_MAP.items()) if info['is_admin']]
+
+        hashtag_data = load_hashtag_data()
+        if hashtag_data:
+            admin_cmds.extend(f"/{tag}" for tag in sorted(hashtag_data.keys()))
+
+        text = "<b>Admin Commands</b>\n"
+        text += "These commands are available to you in groups where you are an admin:\n\n"
+        text += '\n'.join(admin_cmds)
+        text += "\n\n<i>Note: Dynamic hashtag commands (if any are listed) can be removed with /disable.</i>"
+
     elif topic == 'help_back':
         main_menu_keyboard = [
-            [InlineKeyboardButton("General Commands", callback_data='help_general')],
-            [InlineKeyboardButton("Admin Commands", callback_data='help_admin')],
+            [InlineKeyboardButton("General Commands", callback_data='help_general')]
         ]
+        if is_admin(user_id):
+            main_menu_keyboard.append([InlineKeyboardButton("Admin Commands", callback_data='help_admin')])
+
         await query.edit_message_text(
             "Welcome to the help menu! Please choose a category:",
             reply_markup=InlineKeyboardMarkup(main_menu_keyboard)
@@ -986,9 +1037,8 @@ if __name__ == '__main__':
     add_command(app, 'setnickname', setnickname_command)
     add_command(app, 'removenickname', removenickname_command)
     add_command(app, 'enable', enable_command)
+    add_command(app, 'update', update_command)
 
-    # Add the conversation handler with a high priority
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_help_conversation_handler), group=-1)
     app.add_handler(CallbackQueryHandler(help_menu_handler, pattern=r'^help_'))
 
     # Fallback handler for dynamic hashtag commands.
