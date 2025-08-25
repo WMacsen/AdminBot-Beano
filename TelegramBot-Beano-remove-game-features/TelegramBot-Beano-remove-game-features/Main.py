@@ -11,7 +11,7 @@ import traceback
 from typing import Final
 import uuid
 from telegram import Update, User, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext, CallbackQueryHandler, ConversationHandler
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext, CallbackQueryHandler, ConversationHandler, JobQueue
 from telegram.constants import ChatMemberStatus
 
 # =========================
@@ -117,35 +117,88 @@ def save_admin_nicknames(data):
 @command_handler_wrapper(admin_only=True)
 async def setnickname_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
-        await update.message.reply_text("Only the owner can use this command.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Only the owner can use this command.")
         return
-
-    if len(context.args) < 2:
-        await update.message.reply_text("Usage: /setnickname <@username or user_id> <nickname>")
-        return
-
-    target_identifier = context.args[0]
-    nickname = " ".join(context.args[1:])
 
     target_id = None
-    if target_identifier.isdigit():
-        target_id = int(target_identifier)
+    nickname = ""
+
+    reply_message = update.message.reply_to_message
+    if reply_message:
+        if not context.args:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="Usage: Reply to a message with `/setnickname <nickname>`")
+            return
+        target_id = reply_message.from_user.id
+        nickname = " ".join(context.args)
     else:
-        target_id = await get_user_id_by_username(context, update.effective_chat.id, target_identifier)
+        if len(context.args) < 2:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="Usage: /setnickname <@username or user_id> <nickname>")
+            return
+
+        target_identifier = context.args[0]
+        nickname = " ".join(context.args[1:])
+
+        if target_identifier.isdigit():
+            target_id = int(target_identifier)
+        else:
+            target_id = await get_user_id_by_username(context, update.effective_chat.id, target_identifier)
 
     if not target_id:
-        await update.message.reply_text(f"Could not find user {target_identifier}.")
-        return
-
-    if not is_admin(target_id):
-        await update.message.reply_text("You can only set nicknames for admins.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Could not find user.")
         return
 
     nicknames = load_admin_nicknames()
     nicknames[str(target_id)] = nickname
     save_admin_nicknames(nicknames)
 
-    await update.message.reply_text(f"Nickname for user {target_id} has been set to '{nickname}'.")
+    try:
+        member = await context.bot.get_chat_member(update.effective_chat.id, target_id)
+        target_user_info = member.user.mention_html()
+    except Exception:
+        target_user_info = f"user with ID {target_id}"
+
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Nickname for {target_user_info} has been set to '{nickname}'.", parse_mode='HTML')
+
+@command_handler_wrapper(admin_only=True)
+async def removenickname_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Only the owner can use this command.")
+        return
+
+    target_id = None
+
+    reply_message = update.message.reply_to_message
+    if reply_message:
+        target_id = reply_message.from_user.id
+    else:
+        if not context.args:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="Usage: /removenickname <@username or user_id> OR reply to a message with /removenickname")
+            return
+
+        target_identifier = context.args[0]
+        if target_identifier.isdigit():
+            target_id = int(target_identifier)
+        else:
+            target_id = await get_user_id_by_username(context, update.effective_chat.id, target_identifier)
+
+    if not target_id:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Could not find user.")
+        return
+
+    nicknames = load_admin_nicknames()
+    if str(target_id) in nicknames:
+        del nicknames[str(target_id)]
+        save_admin_nicknames(nicknames)
+
+        try:
+            member = await context.bot.get_chat_member(update.effective_chat.id, target_id)
+            target_user_info = member.user.mention_html()
+        except Exception:
+            target_user_info = f"user with ID {target_id}"
+
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Nickname for {target_user_info} has been removed.", parse_mode='HTML')
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="This user does not have a nickname set.")
 
 def load_admin_data():
     """Load admin and owner data from file. Ensures owner is always in admin list."""
@@ -182,11 +235,15 @@ def get_display_name(user_id: int, full_name: str) -> str:
     """
     Determines the display name for a user based on their admin status and nickname.
     """
+    nicknames = load_admin_nicknames()
+    name = nicknames.get(str(user_id))
+    if name:
+        return name
+
     if not is_admin(user_id):
         return "fag"
 
-    nicknames = load_admin_nicknames()
-    return nicknames.get(str(user_id), full_name)
+    return full_name
 
 def get_capitalized_name(user_id: int, full_name: str) -> str:
     """
@@ -206,7 +263,7 @@ def is_admin(user_id):
 
 async def get_user_id_by_username(context, chat_id, username) -> str:
     """Get a user's Telegram ID by their username in a chat."""
-    async for member in context.bot.get_chat_administrators(chat_id):
+    async for member in await context.bot.get_chat_administrators(chat_id):
         if member.user.username and member.user.username.lower() == username.lower().lstrip('@'):
             logger.debug(f"Found user ID {member.user.id} for username {username}")
             return str(member.user.id)
@@ -281,7 +338,7 @@ async def hashtag_message_handler(update: Update, context: ContextTypes.DEFAULT_
     Supports both single messages and media groups.
     Also updates user activity for inactivity tracking.
     """
-    message = update.message
+    message = update.message or update.edited_message
     if not message:
         logger.debug("No message found in update for hashtag handler.")
         return
@@ -293,39 +350,7 @@ async def hashtag_message_handler(update: Update, context: ContextTypes.DEFAULT_
     if not hashtags:
         logger.debug("No hashtags found in message.")
         return
-    # Handle media groups (multiple media sent together)
-    if message.media_group_id:
-        for tag in hashtags:
-            tag = tag.lower()
-            cache_key = (tag, message.media_group_id)
-            group = media_group_cache.setdefault(cache_key, {
-                'user_id': message.from_user.id,
-                'username': message.from_user.username,
-                'text': message.text if message.text else None,
-                'caption': message.caption if message.caption else None,
-                'message_id': message.message_id,
-                'chat_id': message.chat_id,
-                'photos': [],
-                'videos': []
-            })
-            # Add only the last photo (highest resolution) and avoid duplicates
-            if message.photo:
-                file_id = message.photo[-1].file_id
-                if file_id not in group['photos']:
-                    group['photos'].append(file_id)
-            # Add video
-            if message.video:
-                group['videos'].append(message.video.file_id)
-            # Add document if it's a video
-            if message.document and message.document.mime_type and message.document.mime_type.startswith('video'):
-                group['videos'].append(message.document.file_id)
-            # Cancel and reschedule flush timer
-            if cache_key in flush_tasks:
-                flush_tasks[cache_key].cancel()
-            flush_tasks[cache_key] = asyncio.create_task(flush_media_group(tag, message.media_group_id, message.chat_id, context))
-            logger.debug(f"Scheduled flush for media group {cache_key}")
-        # Do not send reply here; reply will be sent after flush
-        return
+
     # Handle single media or text
     data = load_hashtag_data()
     for tag in hashtags:
@@ -336,7 +361,7 @@ async def hashtag_message_handler(update: Update, context: ContextTypes.DEFAULT_
             'text': message.text if message.text else None,
             'caption': message.caption if message.caption else None,
             'message_id': message.message_id,
-            'chat_id': message.chat_id,
+            'chat_id': message.chat.id,
             'media_group_id': None,
             'photos': [],
             'videos': []
@@ -350,7 +375,18 @@ async def hashtag_message_handler(update: Update, context: ContextTypes.DEFAULT_
         data.setdefault(tag, []).append(entry)
         logger.debug(f"Saved single message under tag #{tag}")
     save_hashtag_data(data)
-    await message.reply_text(f"Saved under: {', '.join('#'+t for t in hashtags)}")
+
+    # Notify admins privately
+    admins = await context.bot.get_chat_administrators(message.chat.id)
+    notification_text = (
+        f"A new post from {message.from_user.mention_html()} in group {message.chat.title} "
+        f"has been saved with the tag(s): {', '.join('#'+t for t in hashtags)}"
+    )
+    for admin in admins:
+        try:
+            await context.bot.send_message(chat_id=admin.user.id, text=notification_text, parse_mode='HTML')
+        except Exception:
+            logger.warning(f"Failed to notify admin {admin.user.id} about new hashtagged post.")
 
 # =============================
 # Dynamic Hashtag Command Handler
@@ -368,6 +404,10 @@ async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_
     if not update.message or not update.message.text:
         return
 
+    member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
+    if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+        return  # Silently ignore for non-admins
+
     command = update.message.text[1:].split()[0].lower()
 
     # Prevent this handler from hijacking static commands defined in COMMAND_MAP
@@ -376,7 +416,7 @@ async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_
 
     data = load_hashtag_data()
     if command not in data:
-        await update.message.reply_text(f"No data found for #{command}.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"No data found for #{command}.")
         logger.debug(f"No data found for command: {command}")
         return
     # No admin check: allow all users to use hashtag commands
@@ -384,18 +424,18 @@ async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_
     for entry in data[command]:
         # Send all photos
         for photo_id in entry.get('photos', []):
-            await update.message.reply_photo(photo_id, caption=entry.get('caption') or entry.get('text') or '')
+            await context.bot.send_photo(chat_id=update.effective_chat.id, photo=photo_id, caption=entry.get('caption') or entry.get('text') or '')
             found = True
         # Send all videos
         for video_id in entry.get('videos', []):
-            await update.message.reply_video(video_id, caption=entry.get('caption') or entry.get('text') or '')
+            await context.bot.send_video(chat_id=update.effective_chat.id, video=video_id, caption=entry.get('caption') or entry.get('text') or '')
             found = True
         # Fallback for text/caption only
         if not entry.get('photos') and not entry.get('videos') and (entry.get('text') or entry.get('caption')):
-            await update.message.reply_text(entry.get('text') or entry.get('caption'))
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=entry.get('text') or entry.get('caption'))
             found = True
     if not found:
-        await update.message.reply_text(f"No saved messages or photos for #{command}.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"No saved messages or photos for #{command}.")
         logger.debug(f"No saved messages or media for command: {command}")
 
 # =============================
@@ -403,9 +443,9 @@ async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_
 # =============================
 COMMAND_MAP = {
     'start': {'is_admin': False}, 'help': {'is_admin': False}, 'beowned': {'is_admin': False},
-    'command': {'is_admin': False}, 'remove': {'is_admin': True}, 'admin': {'is_admin': False},
+    'command': {'is_admin': False}, 'disable': {'is_admin': True}, 'admin': {'is_admin': False},
     'link': {'is_admin': True}, 'inactive': {'is_admin': True}, 'setnickname': {'is_admin': True},
-    'enable': {'is_admin': True},
+    'removenickname': {'is_admin': True}, 'enable': {'is_admin': True},
 }
 
 @command_handler_wrapper(admin_only=False)
@@ -455,7 +495,7 @@ async def command_list_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if is_admin_user:
         msg += '\n\n<b>Commands for admins only:</b>\n' + ('\n'.join(admin_only_cmds) if admin_only_cmds else 'None')
 
-    await update.message.reply_text(msg, parse_mode='HTML')
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=msg, parse_mode='HTML')
 
 # Persistent storage for disabled commands per group
 DISABLED_COMMANDS_FILE = 'disabled_commands.json'
@@ -470,17 +510,17 @@ def save_disabled_commands(data):
     with open(DISABLED_COMMANDS_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# /remove - Remove a dynamic hashtag command or disable a static command (admin only)
+# /disable - Remove a dynamic hashtag command or disable a static command (admin only)
 @command_handler_wrapper(admin_only=True)
-async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def disable_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Update user activity for inactivity tracking
     if update.effective_user and update.effective_chat and update.effective_chat.type in ["group", "supergroup"]:
         update_user_activity(update.effective_user.id, update.effective_chat.id)
     if update.effective_chat.type == "private":
-        await update.message.reply_text("This command can only be used in group chats.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="This command can only be used in group chats.")
         return
     if not update.message or not context.args:
-        await update.message.reply_text("Usage: /remove <command or hashtag>")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Usage: /disable <command or hashtag>")
         return
     tag = context.args[0].lstrip('#/').lower()
     data = load_hashtag_data()
@@ -488,7 +528,7 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if tag in data:
         del data[tag]
         save_hashtag_data(data)
-        await update.message.reply_text(f"Removed dynamic command: /{tag}")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Dynamic command /{tag} has been disabled.")
         return
     # Static command disabling
     if tag in COMMAND_MAP:
@@ -498,11 +538,11 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if tag not in disabled[group_id]:
             disabled[group_id].append(tag)
             save_disabled_commands(disabled)
-            await update.message.reply_text(f"Command /{tag} has been disabled in this group. Admins can re-enable it with /enable {tag}.")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Command /{tag} has been disabled in this group. Admins can re-enable it with /enable {tag}.")
         else:
-            await update.message.reply_text(f"Command /{tag} is already disabled.")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Command /{tag} is already disabled.")
         return
-    await update.message.reply_text(f"No such dynamic or static command: /{tag}")
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"No such dynamic or static command: /{tag}")
 
 @command_handler_wrapper(admin_only=True)
 async def enable_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -510,10 +550,10 @@ async def enable_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /enable <command> (admin only): Enables a previously disabled command in the group.
     """
     if update.effective_chat.type not in ["group", "supergroup"]:
-        await update.message.reply_text("This command can only be used in group chats.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="This command can only be used in group chats.")
         return
     if not context.args:
-        await update.message.reply_text("Usage: /enable <command>")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Usage: /enable <command>")
         return
 
     command_to_enable = context.args[0].lstrip('/').lower()
@@ -525,9 +565,9 @@ async def enable_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not disabled[group_id]:  # Remove group key if list is empty
             del disabled[group_id]
         save_disabled_commands(disabled)
-        await update.message.reply_text(f"Command /{command_to_enable} has been enabled in this group.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Command /{command_to_enable} has been enabled in this group.")
     else:
-        await update.message.reply_text(f"Command /{command_to_enable} is not currently disabled.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Command /{command_to_enable} is not currently disabled.")
 
 # Admin help request conversation state
 ADMIN_HELP_STATE = 'awaiting_admin_help_reason'
@@ -540,7 +580,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user and update.effective_chat and update.effective_chat.type in ["group", "supergroup"]:
         update_user_activity(update.effective_user.id, update.effective_chat.id)
     if update.effective_chat.type == "private":
-        await update.message.reply_text("This command can only be used in group chats.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="This command can only be used in group chats.")
         return
     # Check if disabled in this group
     group_id = str(update.effective_chat.id)
@@ -562,7 +602,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'replied_message': replied_message.to_dict() if replied_message else None,
         'reason': None
     }
-    await message.reply_text("Please describe the reason you need admin help. Your request will be sent to all group admins.")
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="Please describe the reason you need admin help. Your request will be sent to all group admins.")
     context.user_data[ADMIN_HELP_STATE] = True
 
 
@@ -647,10 +687,7 @@ async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
     if chat.type == 'private':
-        await update.message.reply_text(
-            "This command is used to generate an invite link for a group. "
-            "Please run this command inside the group you want the link for."
-        )
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="This command is used to generate an invite link for a group. Please run this command inside the group you want the link for.")
         return
 
     if chat.type in ['group', 'supergroup']:
@@ -669,20 +706,14 @@ async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text=f"Here is your single-use invite link for the group '{chat.title}':\n{invite_link.invite_link}"
                 )
                 # Confirm in the group chat
-                await update.message.reply_text("I have sent you a single-use invite link in a private message.")
+                await context.bot.send_message(chat_id=update.effective_chat.id, text="I have sent you a single-use invite link in a private message.")
             except Exception as e:
                 logger.error(f"Failed to send private message to admin {user.id}: {e}")
-                await update.message.reply_text(
-                    "I couldn't send you a private message. "
-                    "Please make sure you have started a chat with me privately first."
-                )
+                await context.bot.send_message(chat_id=update.effective_chat.id, text="I couldn't send you a private message. Please make sure you have started a chat with me privately first.")
 
         except Exception as e:
             logger.error(f"Failed to create invite link for chat {chat.id}: {e}")
-            await update.message.reply_text(
-                "I was unable to create an invite link. "
-                "Please ensure I have the 'Invite Users via Link' permission in this group."
-            )
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="I was unable to create an invite link. Please ensure I have the 'Invite Users via Link' permission in this group.")
 
 
 #Start command
@@ -695,7 +726,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user and update.effective_chat and update.effective_chat.type in ["group", "supergroup"]:
         update_user_activity(update.effective_user.id, update.effective_chat.id)
     if update.effective_chat.type != "private":
-        await update.message.reply_text("Please message me in private to use /start.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Please message me in private to use /start.")
         try:
             await context.bot.send_message(
                 chat_id=update.effective_user.id,
@@ -709,7 +740,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     disabled = load_disabled_commands()
     if 'start' in disabled.get(group_id, []):
         return
-    await update.message.reply_text('Hey there fag! What can I help you with?')
+    await context.bot.send_message(chat_id=update.effective_chat.id, text='Hey there fag! What can I help you with?')
 
 #Help command
 @command_handler_wrapper(admin_only=False)
@@ -718,7 +749,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Shows the interactive help menu.
     """
     if update.effective_chat.type != "private":
-        await update.message.reply_text("Please use the /help command in a private chat with me for a better experience.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Please use the /help command in a private chat with me for a better experience.")
         return
 
     keyboard = [
@@ -783,8 +814,7 @@ async def beowned_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         disabled = load_disabled_commands()
         if 'beowned' in disabled.get(group_id, []):
             return
-    await update.message.reply_text(
-        "If you want to be Lion's property, contact @Lionspridechatbot with a head to toe nude picture of yourself and a clear, concise and complete presentation of yourself.")
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="If you want to be Lion's property, contact @Lionspridechatbot with a head to toe nude picture of yourself and a clear, concise and complete presentation of yourself.")
 
 #Responses
 def handle_response(text: str) -> str:
@@ -793,13 +823,17 @@ def handle_response(text: str) -> str:
         return 'Is @Luke082 here? Someone should use his command (/luke8)!'
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message or update.edited_message
+    if not message:
+        return
+
     # Update user activity for inactivity tracking
-    if update.message and update.message.from_user and update.message.chat and update.message.chat.type in ["group", "supergroup"]:
-        update_user_activity(update.message.from_user.id, update.message.chat.id)
-    if update.message and update.message.text:
-        response = handle_response(update.message.text)
+    if message.from_user and message.chat and message.chat.type in ["group", "supergroup"]:
+        update_user_activity(message.from_user.id, message.chat.id)
+    if message.text:
+        response = handle_response(message.text)
         if response:
-            await update.message.reply_text(response)
+            await message.reply_text(response)
 
 import html
 import traceback
@@ -852,10 +886,10 @@ async def inactive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     - /inactive <n> (1-99) enables auto-kick for users inactive for n days.
     """
     if update.effective_chat.type not in ["group", "supergroup"]:
-        await update.message.reply_text("This command can only be used in group chats.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="This command can only be used in group chats.")
         return
     if not context.args or not context.args[0].strip().isdigit():
-        await update.message.reply_text("Usage: /inactive <days> (0 to disable, 1-99 to enable)")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Usage: /inactive <days> (0 to disable, 1-99 to enable)")
         return
     days = int(context.args[0].strip())
     group_id = str(update.effective_chat.id)
@@ -863,15 +897,15 @@ async def inactive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if days == 0:
         settings.pop(group_id, None)
         save_inactive_settings(settings)
-        await update.message.reply_text("Inactive user kicking is now disabled in this group.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Inactive user kicking is now disabled in this group.")
         logger.debug(f"Inactive kicking disabled for group {group_id}")
         return
     if not (1 <= days <= 99):
-        await update.message.reply_text("Please provide a number of days between 1 and 99.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Please provide a number of days between 1 and 99.")
         return
     settings[group_id] = days
     save_inactive_settings(settings)
-    await update.message.reply_text(f"Inactive user kicking is now enabled for this group. Users inactive for {days} days will be kicked.")
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Inactive user kicking is now enabled for this group. Users inactive for {days} days will be kicked.")
     logger.debug(f"Inactive kicking enabled for group {group_id} with threshold {days} days")
 
 async def check_and_kick_inactive_users(app):
@@ -936,7 +970,8 @@ if __name__ == '__main__':
         # Schedule the periodic job using the job queue (every hour)
         app.job_queue.run_repeating(periodic_inactive_check_job, interval=3600, first=10)
 
-    app = Application.builder().token(TOKEN).post_init(on_startup).build()
+    job_queue = JobQueue()
+    app = Application.builder().token(TOKEN).post_init(on_startup).job_queue(job_queue).build()
 
     #Commands
     # Register all commands using the new helper
@@ -944,11 +979,12 @@ if __name__ == '__main__':
     add_command(app, 'help', help_command)
     add_command(app, 'beowned', beowned_command)
     add_command(app, 'command', command_list_command)
-    add_command(app, 'remove', remove_command)
+    add_command(app, 'disable', disable_command)
     add_command(app, 'admin', admin_command)
     add_command(app, 'link', link_command)
     add_command(app, 'inactive', inactive_command)
     add_command(app, 'setnickname', setnickname_command)
+    add_command(app, 'removenickname', removenickname_command)
     add_command(app, 'enable', enable_command)
 
     # Add the conversation handler with a high priority
@@ -962,9 +998,6 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION | filters.ATTACHMENT) & ~filters.COMMAND, hashtag_message_handler))
     # Unified handler for edited messages: process hashtags, responses, and future logic
     async def edited_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        # Normalize so .message is always present
-        if hasattr(update, 'edited_message') and update.edited_message:
-            update.message = update.edited_message
         # Route edited messages through all main logic
         await hashtag_message_handler(update, context)
         await message_handler(update, context)
