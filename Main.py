@@ -131,31 +131,30 @@ async def setnickname_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         target_id = reply_message.from_user.id
         nickname = " ".join(context.args)
     else:
-        if len(context.args) < 2:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="Usage: /setnickname <@username or user_id> <nickname>")
+        if len(context.args) < 2 or not context.args[0].isdigit():
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="Usage: `/setnickname <user_id> <nickname>` or reply to a user's message.")
             return
 
-        target_identifier = context.args[0]
+        target_id = int(context.args[0])
         nickname = " ".join(context.args[1:])
 
-        if target_identifier.isdigit():
-            target_id = int(target_identifier)
-        else:
-            target_id = await get_user_id_by_username(context, update.effective_chat.id, target_identifier)
-
     if not target_id:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Could not find user.")
+        # This case is unlikely to be reached now but serves as a safeguard.
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Could not identify the target user.")
         return
 
     nicknames = load_admin_nicknames()
     nicknames[str(target_id)] = nickname
     save_admin_nicknames(nicknames)
 
+    target_user_info = f"user with ID {target_id}"
     try:
-        member = await context.bot.get_chat_member(update.effective_chat.id, target_id)
-        target_user_info = member.user.mention_html()
+        if update.effective_chat.type != 'private':
+            member = await context.bot.get_chat_member(update.effective_chat.id, target_id)
+            target_user_info = member.user.mention_html()
     except Exception:
-        target_user_info = f"user with ID {target_id}"
+        # Fallback to user ID if we can't get chat member info
+        pass
 
     await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Nickname for {target_user_info} has been set to '{nickname}'.", parse_mode='HTML')
 
@@ -171,18 +170,14 @@ async def removenickname_command(update: Update, context: ContextTypes.DEFAULT_T
     if reply_message:
         target_id = reply_message.from_user.id
     else:
-        if not context.args:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="Usage: /removenickname <@username or user_id> OR reply to a message with /removenickname")
+        if not context.args or not context.args[0].isdigit():
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="Usage: Reply to a user with /removenickname, or use `/removenickname <user_id>`.")
             return
-
-        target_identifier = context.args[0]
-        if target_identifier.isdigit():
-            target_id = int(target_identifier)
-        else:
-            target_id = await get_user_id_by_username(context, update.effective_chat.id, target_identifier)
+        target_id = int(context.args[0])
 
     if not target_id:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Could not find user.")
+        # This case is unlikely to be reached now but serves as a safeguard.
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Could not identify the target user.")
         return
 
     nicknames = load_admin_nicknames()
@@ -190,11 +185,14 @@ async def removenickname_command(update: Update, context: ContextTypes.DEFAULT_T
         del nicknames[str(target_id)]
         save_admin_nicknames(nicknames)
 
+        target_user_info = f"user with ID {target_id}"
         try:
-            member = await context.bot.get_chat_member(update.effective_chat.id, target_id)
-            target_user_info = member.user.mention_html()
+            if update.effective_chat.type != 'private':
+                member = await context.bot.get_chat_member(update.effective_chat.id, target_id)
+                target_user_info = member.user.mention_html()
         except Exception:
-            target_user_info = f"user with ID {target_id}"
+            # Fallback to user ID if we can't get chat member info
+            pass
 
         await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Nickname for {target_user_info} has been removed.", parse_mode='HTML')
     else:
@@ -319,14 +317,6 @@ def is_admin(user_id):
     logger.debug(f"is_admin({user_id}) -> {is_admin_result}")
     return is_admin_result
 
-async def get_user_id_by_username(context, chat_id, username) -> str:
-    """Get a user's Telegram ID by their username in a chat."""
-    async for member in await context.bot.get_chat_administrators(chat_id):
-        if member.user.username and member.user.username.lower() == username.lower().lstrip('@'):
-            logger.debug(f"Found user ID {member.user.id} for username {username}")
-            return str(member.user.id)
-    logger.debug(f"Username {username} not found in chat {chat_id}")
-    return None
 
 # =============================
 # Hashtag Data Management
