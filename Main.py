@@ -466,7 +466,7 @@ async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_
     if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
         return  # Silently ignore for non-admins
 
-    command = update.message.text[1:].split()[0].lower()
+    command = update.message.text[1:].split('@')[0].split()[0].lower()
 
     # Prevent this handler from hijacking static commands defined in COMMAND_MAP
     if command in COMMAND_MAP:
