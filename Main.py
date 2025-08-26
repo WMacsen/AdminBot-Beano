@@ -1109,6 +1109,7 @@ async def help_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - /command: Lists all available commands in the current group.
 - /beowned: Information on how to be owned.
 - /admin: Request help from admins in a group.
+- /risk: Take a risk and let fate decide if your media gets posted. (Private chat only)
         """
     elif topic == 'help_admin':
         if not is_admin(user_id):
