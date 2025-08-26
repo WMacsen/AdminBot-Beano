@@ -103,6 +103,17 @@ def command_handler_wrapper(admin_only=False):
 # Admin/Owner Data Management
 # =============================
 ADMIN_NICKNAMES_FILE = 'admin_nicknames.json'
+RISK_DATA_FILE = 'risk_data.json'
+
+def load_risk_data():
+    if os.path.exists(RISK_DATA_FILE):
+        with open(RISK_DATA_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+def save_risk_data(data):
+    with open(RISK_DATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 def load_admin_nicknames():
     if os.path.exists(ADMIN_NICKNAMES_FILE):
@@ -487,6 +498,289 @@ async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_
         logger.debug(f"No saved messages or media for command: {command}")
 
 # =============================
+# Risk Command
+# =============================
+
+# States for ConversationHandler
+SELECT_GROUP, AWAIT_MEDIA = range(2)
+
+async def risk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Starts the /risk conversation. Asks user to select a group."""
+    if update.effective_chat.type != "private":
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="The /risk command is only available in private chat."
+        )
+        # Attempt to start a private message instead
+        try:
+            await context.bot.send_message(
+                chat_id=update.effective_user.id,
+                text="Please use the /risk command here."
+            )
+        except Exception:
+            pass # Ignore if user has not started a chat with the bot
+        return ConversationHandler.END
+
+    admin_data = load_admin_data()
+    if not admin_data:
+        await update.message.reply_text("The bot is not yet configured in any groups. Please use /update in a group first.")
+        return ConversationHandler.END
+
+    all_group_ids = {group for groups in admin_data.values() for group in groups}
+    disabled_data = load_disabled_commands()
+
+    keyboard = []
+    for group_id in all_group_ids:
+        if 'risk' in disabled_data.get(str(group_id), []):
+            continue  # Skip disabled groups
+
+        try:
+            chat = await context.bot.get_chat(int(group_id))
+            keyboard.append([InlineKeyboardButton(chat.title, callback_data=f"risk_group_{group_id}")])
+        except Exception as e:
+            logger.warning(f"Could not fetch chat info for group {group_id}: {e}")
+
+    if not keyboard:
+        await update.message.reply_text("There are no groups available for the /risk command right now.")
+        return ConversationHandler.END
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Choose a group where you want to risk your fate:", reply_markup=reply_markup)
+    return SELECT_GROUP
+
+async def select_group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the group selection and asks for media."""
+    query = update.callback_query
+    await query.answer()
+
+    group_id = query.data.replace("risk_group_", "")
+    context.user_data['risk_group_id'] = group_id
+
+    try:
+        chat = await context.bot.get_chat(int(group_id))
+        group_name = chat.title
+    except Exception:
+        group_name = "the selected group"
+
+    await query.edit_message_text(text=f"You have selected '{group_name}'.\n\nPlease send the media (photo, video, or voice note) you want to risk.")
+    return AWAIT_MEDIA
+
+async def receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the media, performs the risk, and saves the data."""
+    user = update.effective_user
+    group_id = context.user_data.get('risk_group_id')
+
+    if not group_id:
+        await update.message.reply_text("Something went wrong. Your group selection was lost. Please start over with /risk.")
+        return ConversationHandler.END
+
+    message = update.message
+    media_type = None
+    file_id = None
+
+    if message.photo:
+        media_type = "photo"
+        file_id = message.photo[-1].file_id
+    elif message.video:
+        media_type = "video"
+        file_id = message.video.file_id
+    elif message.voice:
+        media_type = "voice"
+        file_id = message.voice.file_id
+
+    if not media_type:
+        await update.message.reply_text("That's not a valid media type. Please send a photo, video, or voice note.")
+        return AWAIT_MEDIA
+
+    # The risk: 50/50 chance
+    risk_failed = random.choice([True, False])
+
+    # Save the risk data first
+    risk_data = load_risk_data()
+    risk_id = uuid.uuid4().hex
+    new_risk = {
+        'risk_id': risk_id,
+        'user_id': user.id,
+        'username': user.username,
+        'group_id': group_id,
+        'media_type': media_type,
+        'file_id': file_id,
+        'posted': risk_failed,
+        'timestamp': int(time.time())
+    }
+    risk_data.setdefault(str(user.id), []).append(new_risk)
+    save_risk_data(risk_data)
+
+    if risk_failed:
+        caption = f"{user.mention_html()} decided to risk fate and failed miserably! 😈"
+        try:
+            if media_type == 'photo':
+                await context.bot.send_photo(group_id, file_id, caption=caption, parse_mode='HTML')
+            elif media_type == 'video':
+                await context.bot.send_video(group_id, file_id, caption=caption, parse_mode='HTML')
+            elif media_type == 'voice':
+                await context.bot.send_voice(group_id, file_id, caption=caption, parse_mode='HTML')
+
+            await update.message.reply_text("You were not lucky... your media has been posted to the group.")
+        except Exception as e:
+            logger.error(f"Failed to post risk media for user {user.id} to group {group_id}: {e}")
+            await update.message.reply_text("I couldn't post your media to the group. It might have been deleted or I may not have permission.")
+    else:
+        await update.message.reply_text(f"You were lucky! Your {media_type} will not be posted... this time.")
+
+    # Clean up and end conversation
+    if 'risk_group_id' in context.user_data:
+        del context.user_data['risk_group_id']
+    return ConversationHandler.END
+
+async def risk_cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancels and ends the /risk conversation."""
+    await update.message.reply_text("The risk has been cancelled.")
+    if 'risk_group_id' in context.user_data:
+        del context.user_data['risk_group_id']
+    return ConversationHandler.END
+
+# =============================
+# SeeRisk Command
+# =============================
+@command_handler_wrapper(admin_only=True)
+async def seerisk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to see all risks taken by a specific user."""
+    if not context.args:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Usage: /seerisk <user_id or @username>")
+        return
+
+    target_arg = context.args[0]
+    target_user_id = None
+    risk_data = load_risk_data()
+
+    if target_arg.startswith('@'):
+        target_username = target_arg[1:].lower()
+        # Search for the user ID corresponding to the username
+        for user_id_str, risks in risk_data.items():
+            if any(r.get('username', '').lower() == target_username for r in risks):
+                target_user_id = user_id_str
+                break
+        if not target_user_id:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"No risk data found for username {target_arg}.")
+            return
+    elif target_arg.isdigit():
+        target_user_id = target_arg
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Invalid input. Please provide a valid user ID or a @username.")
+        return
+
+    user_risks = risk_data.get(target_user_id)
+
+    if not user_risks:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"No risk data found for user ID {target_user_id}.")
+        return
+
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Found {len(user_risks)} risk(s) for user ID {target_user_id}:")
+
+    for risk in user_risks:
+        try:
+            group_chat = await context.bot.get_chat(int(risk['group_id']))
+            group_name = group_chat.title
+        except Exception:
+            group_name = f"ID {risk['group_id']}"
+
+        from datetime import datetime
+        ts = datetime.fromtimestamp(risk['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
+
+        status = "Already Posted" if risk['posted'] else "Not Posted"
+
+        caption = (
+            f"Risk taken on: {ts}\n"
+            f"Target Group: {group_name}\n"
+            f"Status: {status}"
+        )
+
+        keyboard = []
+        if not risk['posted']:
+            callback_data = f"postrisk_{risk['user_id']}_{risk['risk_id']}"
+            keyboard.append([InlineKeyboardButton("Post Now", callback_data=callback_data)])
+
+        reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+
+        media_type = risk['media_type']
+        file_id = risk['file_id']
+
+        try:
+            if media_type == 'photo':
+                await context.bot.send_photo(update.effective_chat.id, file_id, caption=caption, reply_markup=reply_markup)
+            elif media_type == 'video':
+                await context.bot.send_video(update.effective_chat.id, file_id, caption=caption, reply_markup=reply_markup)
+            elif media_type == 'voice':
+                await context.bot.send_voice(update.effective_chat.id, file_id, caption=caption, reply_markup=reply_markup)
+        except Exception as e:
+            await context.bot.send_message(update.effective_chat.id, text=f"Could not retrieve media for a risk from {ts}. It might be too old or deleted. Error: {e}")
+
+
+async def post_risk_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback to post a specific risk to its group."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        _, user_id, risk_id = query.data.split('_')
+    except ValueError:
+        await query.edit_message_text("Error: Invalid callback data.")
+        return
+
+    risk_data = load_risk_data()
+    user_risks = risk_data.get(user_id, [])
+
+    target_risk = None
+    for risk in user_risks:
+        if risk['risk_id'] == risk_id:
+            target_risk = risk
+            break
+
+    if not target_risk:
+        await query.edit_message_text("Error: Could not find this risk. It may have been deleted.")
+        return
+
+    if target_risk['posted']:
+        await query.edit_message_text("This risk has already been posted.")
+        return
+
+    try:
+        user = await context.bot.get_chat(int(user_id))
+        user_mention = user.mention_html()
+    except Exception:
+        user_mention = f"User {user_id}"
+
+    caption = f"{user_mention} decided to risk fate and failed miserably! 😈"
+
+    try:
+        media_type = target_risk['media_type']
+        file_id = target_risk['file_id']
+        group_id = target_risk['group_id']
+
+        if media_type == 'photo':
+            await context.bot.send_photo(group_id, file_id, caption=caption, parse_mode='HTML')
+        elif media_type == 'video':
+            await context.bot.send_video(group_id, file_id, caption=caption, parse_mode='HTML')
+        elif media_type == 'voice':
+            await context.bot.send_voice(group_id, file_id, caption=caption, parse_mode='HTML')
+
+        # Update the risk data
+        target_risk['posted'] = True
+        save_risk_data(risk_data)
+
+        # Update the admin's message
+        original_caption = query.message.caption
+        new_caption = original_caption.replace("Status: Not Posted", "Status: ✅ Posted by Admin")
+        await query.edit_message_caption(caption=new_caption, reply_markup=None)
+        await context.bot.send_message(chat_id=query.message.chat_id, text="Media has been posted to the group.")
+
+    except Exception as e:
+        logger.error(f"Admin failed to post risk {risk_id} for user {user_id}: {e}")
+        await context.bot.send_message(chat_id=query.message.chat_id, text=f"Failed to post media: {e}")
+
+
+# =============================
 # /command - List all commands
 # =============================
 COMMAND_MAP = {
@@ -494,6 +788,7 @@ COMMAND_MAP = {
     'command': {'is_admin': False}, 'disable': {'is_admin': True}, 'admin': {'is_admin': False},
     'link': {'is_admin': True}, 'inactive': {'is_admin': True}, 'setnickname': {'is_admin': True},
     'removenickname': {'is_admin': True}, 'enable': {'is_admin': True}, 'update': {'is_admin': True},
+    'risk': {'is_admin': False}, 'seerisk': {'is_admin': True},
 }
 
 @command_handler_wrapper(admin_only=False)
@@ -1018,6 +1313,20 @@ if __name__ == '__main__':
     app = Application.builder().token(TOKEN).post_init(on_startup).job_queue(job_queue).build()
 
     #Commands
+    # Conversation handler for the /risk command
+    risk_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('risk', risk_command)],
+        states={
+            SELECT_GROUP: [CallbackQueryHandler(select_group_callback, pattern='^risk_group_')],
+            AWAIT_MEDIA: [MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE, receive_media_handler)],
+        },
+        fallbacks=[CommandHandler('cancel', risk_cancel_command)],
+        per_message=False,
+        per_user=True
+    )
+    app.add_handler(risk_conv_handler)
+    add_command(app, 'cancel', risk_cancel_command)
+
     # Register all commands using the new helper
     add_command(app, 'start', start_command)
     add_command(app, 'help', help_command)
@@ -1031,8 +1340,11 @@ if __name__ == '__main__':
     add_command(app, 'removenickname', removenickname_command)
     add_command(app, 'enable', enable_command)
     add_command(app, 'update', update_command)
+    add_command(app, 'seerisk', seerisk_command)
+    add_command(app, 'risk', risk_command)
 
     app.add_handler(CallbackQueryHandler(help_menu_handler, pattern=r'^help_'))
+    app.add_handler(CallbackQueryHandler(post_risk_callback, pattern=r'^postrisk_'))
 
     # Fallback handler for dynamic hashtag commands.
     # The group=1 makes it lower priority than the static commands registered with add_command (which are in the default group 0)
