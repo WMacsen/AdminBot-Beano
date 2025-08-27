@@ -504,6 +504,10 @@ async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_
 # States for ConversationHandler
 SELECT_GROUP, AWAIT_MEDIA = range(2)
 
+# States for Post ConversationHandler
+SELECT_POST_GROUP, AWAIT_POST_MEDIA, AWAIT_POST_CAPTION, CONFIRM_POST = range(2, 6)
+
+
 async def risk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the /risk conversation. Asks user to select a group."""
     if update.effective_chat.type != "private":
@@ -633,11 +637,24 @@ async def receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TY
         del context.user_data['risk_group_id']
     return ConversationHandler.END
 
-async def risk_cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Cancels and ends the /risk conversation."""
-    await update.message.reply_text("The risk has been cancelled.")
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancels and ends the current conversation (risk or post)."""
+    message_to_send = "Operation cancelled."
+
+    # Check for risk conversation state
     if 'risk_group_id' in context.user_data:
-        del context.user_data['risk_group_id']
+        context.user_data.pop('risk_group_id', None)
+        message_to_send = "The risk has been cancelled."
+
+    # Check for post conversation state
+    elif 'post_group_id' in context.user_data:
+        for key in ['post_group_id', 'post_media_type', 'post_file_id', 'post_caption']:
+            context.user_data.pop(key, None)
+        message_to_send = "The post creation process has been cancelled."
+
+    await update.message.reply_text(message_to_send)
+
+    # End the conversation
     return ConversationHandler.END
 
 # =============================
@@ -781,14 +798,196 @@ async def post_risk_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 # =============================
+# /post Command Conversation
+# =============================
+async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Starts the /post conversation. Asks admin to select a group to post in."""
+    user_id = update.effective_user.id
+    if update.effective_chat.type != "private":
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="The /post command is only available in private chat."
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="Please use the /post command here to start creating a post."
+            )
+        except Exception:
+            pass # Ignore if user has not started a chat with the bot
+        return ConversationHandler.END
+
+    if not is_admin(user_id):
+        await update.message.reply_text("This is an admin-only command. You are not authorized.")
+        return ConversationHandler.END
+
+    admin_data = load_admin_data()
+    # In Python 3, .get() on a dictionary with a default value is safe.
+    # The user_id needs to be a string for JSON key matching.
+    user_admin_groups = admin_data.get(str(user_id), [])
+
+    if not user_admin_groups:
+        await update.message.reply_text("You are not registered as an admin in any groups that I'm aware of. Try running /update in a group where you are an admin.")
+        return ConversationHandler.END
+
+    disabled_data = load_disabled_commands()
+    keyboard = []
+    for group_id in user_admin_groups:
+        # Check if 'post' command is disabled for this group
+        if 'post' in disabled_data.get(str(group_id), []):
+            continue  # Skip this group
+
+        try:
+            chat = await context.bot.get_chat(int(group_id))
+            keyboard.append([InlineKeyboardButton(chat.title, callback_data=f"post_group_{group_id}")])
+        except Exception as e:
+            logger.warning(f"Could not fetch chat info for group {group_id} for /post command: {e}")
+
+    if not keyboard:
+        await update.message.reply_text("There are no available groups for you to post in. The /post command may be disabled in the groups where you are an admin.")
+        return ConversationHandler.END
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Please choose a group to post your message in:", reply_markup=reply_markup)
+    return SELECT_POST_GROUP
+
+async def select_post_group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles group selection and asks for media."""
+    query = update.callback_query
+    await query.answer()
+
+    group_id = query.data.replace("post_group_", "")
+    context.user_data['post_group_id'] = group_id
+
+    try:
+        chat = await context.bot.get_chat(int(group_id))
+        group_name = chat.title
+    except Exception:
+        group_name = "the selected group"
+
+    await query.edit_message_text(text=f"You have selected '{group_name}'.\n\nPlease send the media (photo or video) for your post.")
+    return AWAIT_POST_MEDIA
+
+async def receive_post_media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles receiving the media for the post."""
+    message = update.message
+    media_type = None
+    file_id = None
+
+    if message.photo:
+        media_type = "photo"
+        file_id = message.photo[-1].file_id
+    elif message.video:
+        media_type = "video"
+        file_id = message.video.file_id
+    else:
+        await update.message.reply_text("This is not a valid media type. Please send a photo or a video.")
+        return AWAIT_POST_MEDIA # Remain in the same state
+
+    context.user_data['post_media_type'] = media_type
+    context.user_data['post_file_id'] = file_id
+
+    await update.message.reply_text("Media received. Now, please enter the caption for your post.")
+    return AWAIT_POST_CAPTION
+
+async def receive_post_caption_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles receiving the caption and shows a preview."""
+    caption = update.message.text
+    if not caption:
+        await update.message.reply_text("Please provide a caption for your post.")
+        return AWAIT_POST_CAPTION
+
+    context.user_data['post_caption'] = caption
+    media_type = context.user_data['post_media_type']
+    file_id = context.user_data['post_file_id']
+
+    # Show preview
+    await update.message.reply_text("Here is a preview of your post:")
+
+    keyboard = [
+        [
+            InlineKeyboardButton("Confirm & Post", callback_data='post_confirm'),
+            InlineKeyboardButton("Cancel", callback_data='post_cancel')
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    try:
+        if media_type == 'photo':
+            await context.bot.send_photo(update.effective_chat.id, file_id, caption=caption, reply_markup=reply_markup)
+        elif media_type == 'video':
+            await context.bot.send_video(update.effective_chat.id, file_id, caption=caption, reply_markup=reply_markup)
+    except Exception as e:
+        logger.error(f"Error sending preview for /post command: {e}")
+        await update.message.reply_text("There was an error showing the preview. Please try again.")
+        return AWAIT_POST_MEDIA
+
+    return CONFIRM_POST
+
+async def post_confirmation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the final confirmation from the admin."""
+    query = update.callback_query
+    await query.answer()
+
+    # It's good practice to remove the buttons from the preview message to prevent double-clicks
+    await query.edit_message_reply_markup(reply_markup=None)
+
+    if query.data == 'post_confirm':
+        group_id = context.user_data.get('post_group_id')
+        media_type = context.user_data.get('post_media_type')
+        file_id = context.user_data.get('post_file_id')
+        caption = context.user_data.get('post_caption')
+
+        if not all([group_id, media_type, file_id, caption]):
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="An error occurred, some information was lost. Please start over with /post."
+            )
+            # Clean up potentially partial data
+            for key in ['post_group_id', 'post_media_type', 'post_file_id', 'post_caption']:
+                context.user_data.pop(key, None)
+            return ConversationHandler.END
+
+        try:
+            if media_type == 'photo':
+                await context.bot.send_photo(group_id, file_id, caption=caption)
+            elif media_type == 'video':
+                await context.bot.send_video(group_id, file_id, caption=caption)
+
+            # Send a new message as confirmation
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="✅ Your post has been sent successfully!"
+            )
+        except Exception as e:
+            logger.error(f"Failed to send post to group {group_id}: {e}")
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"An error occurred while trying to post. I might not have the right permissions in the target group.\nError: {e}"
+            )
+
+    elif query.data == 'post_cancel':
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="Post cancelled."
+        )
+
+    # Clean up user_data
+    for key in ['post_group_id', 'post_media_type', 'post_file_id', 'post_caption']:
+        context.user_data.pop(key, None)
+
+    return ConversationHandler.END
+
+# =============================
 # /command - List all commands
 # =============================
 COMMAND_MAP = {
     'start': {'is_admin': False}, 'help': {'is_admin': False}, 'beowned': {'is_admin': False},
     'command': {'is_admin': False}, 'disable': {'is_admin': True}, 'admin': {'is_admin': False},
-    'link': {'is_admin': True}, 'inactive': {'is_admin': True}, 'setnickname': {'is_admin': True},
-    'removenickname': {'is_admin': True}, 'enable': {'is_admin': True}, 'update': {'is_admin': True},
-    'risk': {'is_admin': False}, 'seerisk': {'is_admin': True},
+    'link': {'is_admin': True}, 'inactive': {'is_admin': True}, 'post': {'is_admin': True},
+    'setnickname': {'is_admin': True}, 'removenickname': {'is_admin': True},
+    'enable': {'is_admin': True}, 'update': {'is_admin': True}, 'risk': {'is_admin': False},
+    'seerisk': {'is_admin': True},
 }
 
 @command_handler_wrapper(admin_only=False)
@@ -1035,35 +1234,47 @@ async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #Start command
 @command_handler_wrapper(admin_only=False)
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the /start command with different messages for private and group chats."""
     if context.args and context.args[0].startswith('setstake_'):
-        return  # This is handled by the game setup conversation handler
+        return  # This is handled by a different conversation handler
 
-    # Update user activity for inactivity tracking
-    if update.effective_user and update.effective_chat and update.effective_chat.type in ["group", "supergroup"]:
-        update_user_activity(update.effective_user.id, update.effective_chat.id)
+    user = update.effective_user
+    chat = update.effective_chat
 
-    user_mention = update.effective_user.mention_html()
-    start_message = f"Hey there {user_mention}! What can I help you with?"
+    # Update user activity in groups
+    if user and chat and chat.type in ["group", "supergroup"]:
+        update_user_activity(user.id, chat.id)
 
-    if update.effective_chat.type != "private":
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="Please message me in private to use /start.")
+    # Define the detailed private start message
+    private_start_message = """
+Hello! I'm a bot designed to help manage groups and add a bit of fun. Here are the main commands to get you started:
+
+- /help: Shows a full menu of all my available commands.
+- /command: When used in a group, this lists all commands available in that specific group.
+- /risk: Feeling lucky? Use this command in our private chat to risk posting some media to a group.
+
+If you encounter any bugs or have ideas for new features, please contact my creator: @BeansOfBeano
+"""
+
+    if chat.type == "private":
+        # In a private chat, send the detailed message
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=private_start_message,
+            disable_web_page_preview=True
+        )
+    else:
+        # In a group chat, send a prompt and try to message the user privately
+        group_start_message = f"Hey {user.mention_html()}! Please message me in private to get started."
+        await context.bot.send_message(chat_id=chat.id, text=group_start_message, parse_mode='HTML')
         try:
             await context.bot.send_message(
-                chat_id=update.effective_user.id,
-                text=start_message,
-                parse_mode='HTML'
+                chat_id=user.id,
+                text=private_start_message,
+                disable_web_page_preview=True
             )
         except Exception:
-            logger.warning(f"Failed to send private start message to {update.effective_user.id}")
-        return
-
-    # Check if disabled in this group (should never trigger in private)
-    group_id = str(update.effective_chat.id)
-    disabled = load_disabled_commands()
-    if 'start' in disabled.get(group_id, []):
-        return
-
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=start_message, parse_mode='HTML')
+            logger.warning(f"Failed to send private start message to {user.id} who started in group {chat.id}")
 
 #Help command
 @command_handler_wrapper(admin_only=False)
@@ -1116,16 +1327,30 @@ async def help_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("You are not authorized to view this section.", show_alert=True)
             return
 
-        admin_cmds = [f"/{cmd}" for cmd, info in sorted(COMMAND_MAP.items()) if info['is_admin']]
+        text = """
+<b>Administrator Commands</b>
 
+<u>Content & User Management</u>
+- /post: Create a post with media and a caption to send to a group where you are an admin. (Private chat only)
+- /disable &lt;command&gt;: Disables a static command or a dynamic hashtag command in the current group.
+- /enable &lt;command&gt;: Re-enables a disabled static command.
+- /link: Generates a single-use invite link for the group.
+- /inactive &lt;days&gt;: Sets up automatic kicking for users who are inactive for a specified number of days (e.g., /inactive 30). Use 0 to disable.
+
+<u>Admin & User Identity</u>
+- /update: Refreshes the bot's list of admins for the current group. Run this when admin roles change.
+- /setnickname &lt;user&gt; &lt;nickname&gt;: Sets a custom nickname for a user. You can reply to a user or use their ID.
+- /removenickname &lt;user&gt;: Removes a user's nickname.
+
+<u>Risk & History</u>
+- /seerisk &lt;user_id or @username&gt;: View the risk history of a specific user.
+"""
+        # Append dynamic hashtag commands if they exist
         hashtag_data = load_hashtag_data()
         if hashtag_data:
-            admin_cmds.extend(f"/{tag}" for tag in sorted(hashtag_data.keys()))
-
-        text = "<b>Admin Commands</b>\n"
-        text += "These commands are available to you in groups where you are an admin:\n\n"
-        text += '\n'.join(admin_cmds)
-        text += "\n\n<i>Note: Dynamic hashtag commands (if any are listed) can be removed with /disable.</i>"
+            text += "\n<b>Dynamic Hashtag Commands (Admin-only):</b>\n"
+            text += '\n'.join(f"/{tag}" for tag in sorted(hashtag_data.keys()))
+            text += "\n<i>These are created by posting with a hashtag and can be removed with /disable.</i>"
 
     elif topic == 'help_back':
         main_menu_keyboard = [
@@ -1321,14 +1546,29 @@ if __name__ == '__main__':
             SELECT_GROUP: [CallbackQueryHandler(select_group_callback, pattern='^risk_group_')],
             AWAIT_MEDIA: [MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE, receive_media_handler)],
         },
-        fallbacks=[CommandHandler('cancel', risk_cancel_command)],
+        fallbacks=[CommandHandler('cancel', cancel_command)],
         per_message=False,
         per_user=True
     )
     app.add_handler(risk_conv_handler)
-    add_command(app, 'cancel', risk_cancel_command)
+
+    # Conversation handler for the /post command
+    post_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('post', post_command)],
+        states={
+            SELECT_POST_GROUP: [CallbackQueryHandler(select_post_group_callback, pattern='^post_group_')],
+            AWAIT_POST_MEDIA: [MessageHandler(filters.PHOTO | filters.VIDEO, receive_post_media_handler)],
+            AWAIT_POST_CAPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_post_caption_handler)],
+            CONFIRM_POST: [CallbackQueryHandler(post_confirmation_callback, pattern='^post_confirm$|^post_cancel$')]
+        },
+        fallbacks=[CommandHandler('cancel', cancel_command)],
+        per_message=False,
+        per_user=True
+    )
+    app.add_handler(post_conv_handler)
 
     # Register all commands using the new helper
+    add_command(app, 'cancel', cancel_command)
     add_command(app, 'start', start_command)
     add_command(app, 'help', help_command)
     add_command(app, 'beowned', beowned_command)
@@ -1343,6 +1583,7 @@ if __name__ == '__main__':
     add_command(app, 'update', update_command)
     add_command(app, 'seerisk', seerisk_command)
     add_command(app, 'risk', risk_command)
+    add_command(app, 'post', post_command)
 
     app.add_handler(CallbackQueryHandler(help_menu_handler, pattern=r'^help_'))
     app.add_handler(CallbackQueryHandler(post_risk_callback, pattern=r'^postrisk_'))
