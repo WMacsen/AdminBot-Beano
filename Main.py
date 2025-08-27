@@ -38,13 +38,21 @@ logger.debug(f"Environment variables: {os.environ}")
 
 # Load the Telegram bot token from environment variable
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
+OWNER_ID = os.environ.get('OWNER_ID')
+
+# --- Essential Configuration Check ---
+if not TOKEN:
+    raise ValueError("Fatal Error: TELEGRAM_TOKEN environment variable is not set.")
+if not OWNER_ID:
+    raise ValueError("Fatal Error: OWNER_ID environment variable is not set.")
+# ------------------------------------
+
 BOT_USERNAME: Final = '@MasterBeanoBot'  # Bot's username (update if needed)
 
 # File paths for persistent data storage
 HASHTAG_DATA_FILE = 'hashtag_data.json'  # Stores hashtagged messages/media
 ADMIN_DATA_FILE = 'admins.json'          # Stores admin/owner info
 from functools import wraps
-OWNER_ID = 7237569475  # Your Telegram ID (change to your actual Telegram user ID)
 
 
 # =========================
