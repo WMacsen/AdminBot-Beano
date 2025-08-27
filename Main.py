@@ -929,6 +929,9 @@ async def post_confirmation_callback(update: Update, context: ContextTypes.DEFAU
     query = update.callback_query
     await query.answer()
 
+    # It's good practice to remove the buttons from the preview message to prevent double-clicks
+    await query.edit_message_reply_markup(reply_markup=None)
+
     if query.data == 'post_confirm':
         group_id = context.user_data.get('post_group_id')
         media_type = context.user_data.get('post_media_type')
@@ -936,7 +939,10 @@ async def post_confirmation_callback(update: Update, context: ContextTypes.DEFAU
         caption = context.user_data.get('post_caption')
 
         if not all([group_id, media_type, file_id, caption]):
-            await query.edit_message_text("An error occurred, some information was lost. Please start over with /post.")
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="An error occurred, some information was lost. Please start over with /post."
+            )
             # Clean up potentially partial data
             for key in ['post_group_id', 'post_media_type', 'post_file_id', 'post_caption']:
                 context.user_data.pop(key, None)
@@ -948,13 +954,23 @@ async def post_confirmation_callback(update: Update, context: ContextTypes.DEFAU
             elif media_type == 'video':
                 await context.bot.send_video(group_id, file_id, caption=caption)
 
-            await query.edit_message_text("✅ Your post has been sent successfully!")
+            # Send a new message as confirmation
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="✅ Your post has been sent successfully!"
+            )
         except Exception as e:
             logger.error(f"Failed to send post to group {group_id}: {e}")
-            await query.edit_message_text(f"An error occurred while trying to post. I might not have the right permissions in the target group.\nError: {e}")
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"An error occurred while trying to post. I might not have the right permissions in the target group.\nError: {e}"
+            )
 
     elif query.data == 'post_cancel':
-        await query.edit_message_text("Post cancelled.")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="Post cancelled."
+        )
 
     # Clean up user_data
     for key in ['post_group_id', 'post_media_type', 'post_file_id', 'post_caption']:
@@ -1316,18 +1332,18 @@ async def help_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 <u>Content & User Management</u>
 - /post: Create a post with media and a caption to send to a group where you are an admin. (Private chat only)
-- /disable <command>: Disables a static command or a dynamic hashtag command in the current group.
-- /enable <command>: Re-enables a disabled static command.
+- /disable &lt;command&gt;: Disables a static command or a dynamic hashtag command in the current group.
+- /enable &lt;command&gt;: Re-enables a disabled static command.
 - /link: Generates a single-use invite link for the group.
-- /inactive <days>: Sets up automatic kicking for users who are inactive for a specified number of days (e.g., /inactive 30). Use 0 to disable.
+- /inactive &lt;days&gt;: Sets up automatic kicking for users who are inactive for a specified number of days (e.g., /inactive 30). Use 0 to disable.
 
 <u>Admin & User Identity</u>
 - /update: Refreshes the bot's list of admins for the current group. Run this when admin roles change.
-- /setnickname <user> <nickname>: Sets a custom nickname for a user. You can reply to a user or use their ID.
-- /removenickname <user>: Removes a user's nickname.
+- /setnickname &lt;user&gt; &lt;nickname&gt;: Sets a custom nickname for a user. You can reply to a user or use their ID.
+- /removenickname &lt;user&gt;: Removes a user's nickname.
 
 <u>Risk & History</u>
-- /seerisk <user_id or @username>: View the risk history of a specific user.
+- /seerisk &lt;user_id or @username&gt;: View the risk history of a specific user.
 """
         # Append dynamic hashtag commands if they exist
         hashtag_data = load_hashtag_data()
