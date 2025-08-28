@@ -540,7 +540,8 @@ async def risk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
         try:
             chat = await context.bot.get_chat(int(group_id))
-            keyboard.append([InlineKeyboardButton(chat.title, callback_data=f"risk_group_{group_id}")])
+            if chat and chat.title:
+                keyboard.append([InlineKeyboardButton(chat.title, callback_data=f"risk_group_{group_id}")])
         except Exception as e:
             logger.warning(f"Could not fetch chat info for group {group_id}: {e}")
 
@@ -839,7 +840,8 @@ async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
         try:
             chat = await context.bot.get_chat(int(group_id))
-            keyboard.append([InlineKeyboardButton(chat.title, callback_data=f"post_group_{group_id}")])
+            if chat and chat.title:
+                keyboard.append([InlineKeyboardButton(chat.title, callback_data=f"post_group_{group_id}")])
         except Exception as e:
             logger.warning(f"Could not fetch chat info for group {group_id} for /post command: {e}")
 
