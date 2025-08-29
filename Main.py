@@ -10,9 +10,25 @@ import html
 import traceback
 from typing import Final
 import uuid
+from pathlib import Path
 from telegram import Update, User, InlineKeyboardButton, InlineKeyboardMarkup
+import asyncio
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext, CallbackQueryHandler, ConversationHandler, JobQueue
 from telegram.constants import ChatMemberStatus
+
+# Get the absolute path of the directory where the script is located
+BASE_DIR = Path(__file__).resolve().parent
+
+# Create locks for file access
+FILE_LOCKS = {
+    "risk": asyncio.Lock(),
+    "nicknames": asyncio.Lock(),
+    "admins": asyncio.Lock(),
+    "hashtags": asyncio.Lock(),
+    "activity": asyncio.Lock(),
+    "inactive": asyncio.Lock(),
+    "disabled": asyncio.Lock(),
+}
 
 # =========================
 # Logging Configuration
@@ -21,7 +37,7 @@ logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("bot.log", encoding='utf-8'),
+        logging.FileHandler(BASE_DIR / "bot.log", encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -41,8 +57,8 @@ TOKEN = os.environ.get('TELEGRAM_TOKEN')
 BOT_USERNAME: Final = '@MasterBeanoBot'  # Bot's username (update if needed)
 
 # File paths for persistent data storage
-HASHTAG_DATA_FILE = 'hashtag_data.json'  # Stores hashtagged messages/media
-ADMIN_DATA_FILE = 'admins.json'          # Stores admin/owner info
+HASHTAG_DATA_FILE = BASE_DIR / 'hashtag_data.json'  # Stores hashtagged messages/media
+ADMIN_DATA_FILE = BASE_DIR / 'admins.json'          # Stores admin/owner info
 from functools import wraps
 OWNER_ID = 7237569475  # Your Telegram ID (change to your actual Telegram user ID)
 
@@ -69,7 +85,7 @@ def command_handler_wrapper(admin_only=False):
                 # Check if the command is disabled
                 if chat.type in ['group', 'supergroup']:
                     command_name = func.__name__.replace('_command', '')
-                    disabled_cmds = set(load_disabled_commands().get(str(chat.id), []))
+                    disabled_cmds = set((await load_disabled_commands()).get(str(chat.id), []))
                     if command_name in disabled_cmds:
                         logger.info(f"Command '{command_name}' is disabled in group {chat.id}. Aborting.")
                         return # Silently abort if command is disabled
@@ -102,28 +118,40 @@ def command_handler_wrapper(admin_only=False):
 # =============================
 # Admin/Owner Data Management
 # =============================
-ADMIN_NICKNAMES_FILE = 'admin_nicknames.json'
-RISK_DATA_FILE = 'risk_data.json'
+ADMIN_NICKNAMES_FILE = BASE_DIR / 'admin_nicknames.json'
+RISK_DATA_FILE = BASE_DIR / 'risk_data.json'
 
-def load_risk_data():
-    if os.path.exists(RISK_DATA_FILE):
+async def load_risk_data():
+    async with FILE_LOCKS["risk"]:
+        if not os.path.exists(RISK_DATA_FILE):
+            return {}
         with open(RISK_DATA_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {}
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                logger.warning(f"Could not decode {RISK_DATA_FILE}, returning empty dict.")
+                return {}
 
-def save_risk_data(data):
-    with open(RISK_DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+async def save_risk_data(data):
+    async with FILE_LOCKS["risk"]:
+        with open(RISK_DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
-def load_admin_nicknames():
-    if os.path.exists(ADMIN_NICKNAMES_FILE):
+async def load_admin_nicknames():
+    async with FILE_LOCKS["nicknames"]:
+        if not os.path.exists(ADMIN_NICKNAMES_FILE):
+            return {}
         with open(ADMIN_NICKNAMES_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {}
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                logger.warning(f"Could not decode {ADMIN_NICKNAMES_FILE}, returning empty dict.")
+                return {}
 
-def save_admin_nicknames(data):
-    with open(ADMIN_NICKNAMES_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+async def save_admin_nicknames(data):
+    async with FILE_LOCKS["nicknames"]:
+        with open(ADMIN_NICKNAMES_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
 @command_handler_wrapper(admin_only=True)
 async def setnickname_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -154,9 +182,9 @@ async def setnickname_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Could not identify the target user.")
         return
 
-    nicknames = load_admin_nicknames()
+    nicknames = await load_admin_nicknames()
     nicknames[str(target_id)] = nickname
-    save_admin_nicknames(nicknames)
+    await save_admin_nicknames(nicknames)
 
     target_user_info = f"user with ID {target_id}"
     try:
@@ -191,10 +219,10 @@ async def removenickname_command(update: Update, context: ContextTypes.DEFAULT_T
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Could not identify the target user.")
         return
 
-    nicknames = load_admin_nicknames()
+    nicknames = await load_admin_nicknames()
     if str(target_id) in nicknames:
         del nicknames[str(target_id)]
-        save_admin_nicknames(nicknames)
+        await save_admin_nicknames(nicknames)
 
         target_user_info = f"user with ID {target_id}"
         try:
@@ -234,7 +262,7 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Load existing admin data
-    admin_data = load_admin_data()
+    admin_data = await load_admin_data()
 
     # Find users who were admin in this group but are no longer
     removed_admins = []
@@ -257,7 +285,7 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"User {user_id} is now also an admin in group {group_id}.")
 
     # Save the updated data
-    save_admin_data(admin_data)
+    await save_admin_data(admin_data)
 
     # Build and send confirmation message
     message_parts = ["✅ Admin list updated for this group."]
@@ -272,9 +300,11 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=update.effective_chat.id, text=message)
 
 
-def load_admin_data():
+async def load_admin_data():
     """Load admin data from file."""
-    if os.path.exists(ADMIN_DATA_FILE):
+    async with FILE_LOCKS["admins"]:
+        if not os.path.exists(ADMIN_DATA_FILE):
+            return {}
         with open(ADMIN_DATA_FILE, 'r', encoding='utf-8') as f:
             try:
                 data = json.load(f)
@@ -283,26 +313,26 @@ def load_admin_data():
                     return {}
                 return data
             except json.JSONDecodeError:
-                logger.warning("Failed to decode admin data file, returning empty.")
+                logger.warning(f"Could not decode {ADMIN_DATA_FILE}, returning empty dict.")
                 return {}
-    return {}
 
-def save_admin_data(data):
+async def save_admin_data(data):
     """Save admin data to file."""
-    with open(ADMIN_DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    logger.debug(f"Saved admin data: {data}")
+    async with FILE_LOCKS["admins"]:
+        with open(ADMIN_DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        logger.debug(f"Saved admin data: {data}")
 
 def is_owner(user_id):
     """Check if the user is the owner."""
     return str(user_id) == str(OWNER_ID)
 
-def get_display_name(user_id: int, full_name: str) -> str:
+async def get_display_name(user_id: int, full_name: str) -> str:
     """
     Determines the display name for a user.
     It prioritizes nicknames, then falls back to the user's full name.
     """
-    nicknames = load_admin_nicknames()
+    nicknames = await load_admin_nicknames()
     name = nicknames.get(str(user_id))
     if name:
         return name
@@ -310,18 +340,18 @@ def get_display_name(user_id: int, full_name: str) -> str:
     # Fallback to the user's full name, safely escaped.
     return html.escape(full_name)
 
-def get_capitalized_name(user_id: int, full_name: str) -> str:
+async def get_capitalized_name(user_id: int, full_name: str) -> str:
     """
     Gets the user's display name and capitalizes it.
     """
-    name = get_display_name(user_id, full_name)
+    name = await get_display_name(user_id, full_name)
     return name.capitalize()
 
-def is_admin(user_id):
+async def is_admin(user_id):
     """Check if the user is the owner or an admin in any group."""
     if is_owner(user_id):
         return True
-    data = load_admin_data()
+    data = await load_admin_data()
     user_id_str = str(user_id)
     # Check if user_id is a key and has a non-empty list of groups
     is_admin_result = user_id_str in data and isinstance(data.get(user_id_str), list) and len(data[user_id_str]) > 0
@@ -332,60 +362,77 @@ def is_admin(user_id):
 # =============================
 # Hashtag Data Management
 # =============================
-def load_hashtag_data():
+async def load_hashtag_data():
     """Load hashtagged message/media data from file."""
-    if os.path.exists(HASHTAG_DATA_FILE):
+    async with FILE_LOCKS["hashtags"]:
+        if not os.path.exists(HASHTAG_DATA_FILE):
+            logger.debug("No hashtag data file found, returning empty dict.")
+            return {}
         with open(HASHTAG_DATA_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            logger.debug(f"Loaded hashtag data: {list(data.keys())}")
-            return data
-    logger.debug("No hashtag data file found, returning empty dict.")
-    return {}
+            try:
+                data = json.load(f)
+                logger.debug(f"Loaded hashtag data: {list(data.keys())}")
+                return data
+            except json.JSONDecodeError:
+                logger.warning(f"Could not decode {HASHTAG_DATA_FILE}, returning empty dict.")
+                return {}
 
-def save_hashtag_data(data):
+async def save_hashtag_data(data):
     """Save hashtagged message/media data to file."""
-    with open(HASHTAG_DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    logger.debug(f"Saved hashtag data: {list(data.keys())}")
+    async with FILE_LOCKS["hashtags"]:
+        with open(HASHTAG_DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        logger.debug(f"Saved hashtag data: {list(data.keys())}")
 
-import asyncio
 import time
 
 
 # =============================
 # Inactivity Tracking & Settings
 # =============================
-ACTIVITY_DATA_FILE = 'activity.json'  # Tracks last activity per user per group
-INACTIVE_SETTINGS_FILE = 'inactive_settings.json'  # Stores inactivity threshold per group
+ACTIVITY_DATA_FILE = BASE_DIR / 'activity.json'  # Tracks last activity per user per group
+INACTIVE_SETTINGS_FILE = BASE_DIR / 'inactive_settings.json'  # Stores inactivity threshold per group
 
-def load_activity_data():
-    if os.path.exists(ACTIVITY_DATA_FILE):
+async def load_activity_data():
+    async with FILE_LOCKS["activity"]:
+        if not os.path.exists(ACTIVITY_DATA_FILE):
+            return {}
         with open(ACTIVITY_DATA_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {}
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                logger.warning(f"Could not decode {ACTIVITY_DATA_FILE}, returning empty dict.")
+                return {}
 
-def save_activity_data(data):
-    with open(ACTIVITY_DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+async def save_activity_data(data):
+    async with FILE_LOCKS["activity"]:
+        with open(ACTIVITY_DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
-def load_inactive_settings():
-    if os.path.exists(INACTIVE_SETTINGS_FILE):
+async def load_inactive_settings():
+    async with FILE_LOCKS["inactive"]:
+        if not os.path.exists(INACTIVE_SETTINGS_FILE):
+            return {}
         with open(INACTIVE_SETTINGS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {}
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                logger.warning(f"Could not decode {INACTIVE_SETTINGS_FILE}, returning empty dict.")
+                return {}
 
-def save_inactive_settings(data):
-    with open(INACTIVE_SETTINGS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+async def save_inactive_settings(data):
+    async with FILE_LOCKS["inactive"]:
+        with open(INACTIVE_SETTINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
-def update_user_activity(user_id, group_id):
-    data = load_activity_data()
+async def update_user_activity(user_id, group_id):
+    data = await load_activity_data()
     group_id = str(group_id)
     user_id = str(user_id)
     if group_id not in data:
         data[group_id] = {}
     data[group_id][user_id] = int(time.time())
-    save_activity_data(data)
+    await save_activity_data(data)
     logger.debug(f"Updated activity for user {user_id} in group {group_id}")
 
 # =============================
@@ -403,7 +450,7 @@ async def hashtag_message_handler(update: Update, context: ContextTypes.DEFAULT_
         return
     # Update user activity for inactivity tracking
     if message.chat and message.from_user and message.chat.type in ["group", "supergroup"]:
-        update_user_activity(message.from_user.id, message.chat.id)
+        await update_user_activity(message.from_user.id, message.chat.id)
     text = message.text or message.caption or ''
     hashtags = re.findall(r'#(\w+)', text)
     if not hashtags:
@@ -411,7 +458,7 @@ async def hashtag_message_handler(update: Update, context: ContextTypes.DEFAULT_
         return
 
     # Handle single media or text
-    data = load_hashtag_data()
+    data = await load_hashtag_data()
     for tag in hashtags:
         tag = tag.lower()
         entry = {
@@ -433,7 +480,7 @@ async def hashtag_message_handler(update: Update, context: ContextTypes.DEFAULT_
             entry['videos'].append(message.document.file_id)
         data.setdefault(tag, []).append(entry)
         logger.debug(f"Saved single message under tag #{tag}")
-    save_hashtag_data(data)
+    await save_hashtag_data(data)
 
     # Notify admins privately
     admins = await context.bot.get_chat_administrators(message.chat.id)
@@ -473,7 +520,7 @@ async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_
     if command in COMMAND_MAP:
         return
 
-    data = load_hashtag_data()
+    data = await load_hashtag_data()
     if command not in data:
         await context.bot.send_message(chat_id=update.effective_chat.id, text=f"No data found for #{command}.")
         logger.debug(f"No data found for command: {command}")
@@ -525,13 +572,13 @@ async def risk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             pass # Ignore if user has not started a chat with the bot
         return ConversationHandler.END
 
-    admin_data = load_admin_data()
+    admin_data = await load_admin_data()
     if not admin_data:
         await update.message.reply_text("The bot is not yet configured in any groups. Please use /update in a group first.")
         return ConversationHandler.END
 
     all_group_ids = {group for groups in admin_data.values() for group in groups}
-    disabled_data = load_disabled_commands()
+    disabled_data = await load_disabled_commands()
 
     keyboard = []
     for group_id in all_group_ids:
@@ -601,7 +648,7 @@ async def receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TY
     risk_failed = random.choice([True, False])
 
     # Save the risk data first
-    risk_data = load_risk_data()
+    risk_data = await load_risk_data()
     risk_id = uuid.uuid4().hex
     new_risk = {
         'risk_id': risk_id,
@@ -614,7 +661,7 @@ async def receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TY
         'timestamp': int(time.time())
     }
     risk_data.setdefault(str(user.id), []).append(new_risk)
-    save_risk_data(risk_data)
+    await save_risk_data(risk_data)
 
     if risk_failed:
         caption = f"{user.mention_html()} decided to risk fate and failed miserably! 😈"
@@ -667,7 +714,7 @@ async def risk_beg_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             context.user_data.pop(key, None)
         return ConversationHandler.END
 
-    risk_data = load_risk_data()
+    risk_data = await load_risk_data()
     user_risks = risk_data.get(str(user.id), [])
 
     target_risk = None
@@ -697,7 +744,7 @@ async def risk_beg_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
         # Update the risk data to mark as posted
         target_risk['posted'] = True
-        save_risk_data(risk_data)
+        await save_risk_data(risk_data)
 
         await query.edit_message_text("As you wish. Your media has been posted.")
 
@@ -754,7 +801,7 @@ async def seerisk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     target_arg = context.args[0]
     target_user_id = None
-    risk_data = load_risk_data()
+    risk_data = await load_risk_data()
 
     if target_arg.startswith('@'):
         target_username = target_arg[1:].lower()
@@ -830,7 +877,7 @@ async def post_risk_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("Error: Invalid callback data.")
         return
 
-    risk_data = load_risk_data()
+    risk_data = await load_risk_data()
     user_risks = risk_data.get(user_id, [])
 
     target_risk = None
@@ -869,7 +916,7 @@ async def post_risk_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         # Update the risk data
         target_risk['posted'] = True
-        save_risk_data(risk_data)
+        await save_risk_data(risk_data)
 
         # Update the admin's message
         original_caption = query.message.caption
@@ -902,11 +949,11 @@ async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             pass # Ignore if user has not started a chat with the bot
         return ConversationHandler.END
 
-    if not is_admin(user_id):
+    if not await is_admin(user_id):
         await update.message.reply_text("This is an admin-only command. You are not authorized.")
         return ConversationHandler.END
 
-    admin_data = load_admin_data()
+    admin_data = await load_admin_data()
     # In Python 3, .get() on a dictionary with a default value is safe.
     # The user_id needs to be a string for JSON key matching.
     user_admin_groups = admin_data.get(str(user_id), [])
@@ -915,7 +962,7 @@ async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         await update.message.reply_text("You are not registered as an admin in any groups that I'm aware of. Try running /update in a group where you are an admin.")
         return ConversationHandler.END
 
-    disabled_data = load_disabled_commands()
+    disabled_data = await load_disabled_commands()
     keyboard = []
     for group_id in user_admin_groups:
         # Check if 'post' command is disabled for this group
@@ -1086,7 +1133,7 @@ async def command_list_command(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     group_id = str(update.effective_chat.id)
-    disabled_cmds = set(load_disabled_commands().get(group_id, []))
+    disabled_cmds = set((await load_disabled_commands()).get(group_id, []))
 
     member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
     is_admin_user = member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]
@@ -1115,7 +1162,7 @@ async def command_list_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # Dynamic hashtag commands (always admin-only)
     if is_admin_user:
-        hashtag_data = load_hashtag_data()
+        hashtag_data = await load_hashtag_data()
         for tag in sorted(hashtag_data.keys()):
             admin_only_cmds.append(f"/{tag}")
 
@@ -1126,24 +1173,30 @@ async def command_list_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await context.bot.send_message(chat_id=update.effective_chat.id, text=msg, parse_mode='HTML')
 
 # Persistent storage for disabled commands per group
-DISABLED_COMMANDS_FILE = 'disabled_commands.json'
+DISABLED_COMMANDS_FILE = BASE_DIR / 'disabled_commands.json'
 
-def load_disabled_commands():
-    if os.path.exists(DISABLED_COMMANDS_FILE):
+async def load_disabled_commands():
+    async with FILE_LOCKS["disabled"]:
+        if not os.path.exists(DISABLED_COMMANDS_FILE):
+            return {}
         with open(DISABLED_COMMANDS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {}
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                logger.warning(f"Could not decode {DISABLED_COMMANDS_FILE}, returning empty dict.")
+                return {}
 
-def save_disabled_commands(data):
-    with open(DISABLED_COMMANDS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+async def save_disabled_commands(data):
+    async with FILE_LOCKS["disabled"]:
+        with open(DISABLED_COMMANDS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
 # /disable - Remove a dynamic hashtag command or disable a static command (admin only)
 @command_handler_wrapper(admin_only=True)
 async def disable_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Update user activity for inactivity tracking
     if update.effective_user and update.effective_chat and update.effective_chat.type in ["group", "supergroup"]:
-        update_user_activity(update.effective_user.id, update.effective_chat.id)
+        await update_user_activity(update.effective_user.id, update.effective_chat.id)
     if update.effective_chat.type == "private":
         await context.bot.send_message(chat_id=update.effective_chat.id, text="This command can only be used in group chats.")
         return
@@ -1151,21 +1204,21 @@ async def disable_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Usage: /disable <command or hashtag>")
         return
     tag = context.args[0].lstrip('#/').lower()
-    data = load_hashtag_data()
+    data = await load_hashtag_data()
     # Dynamic command removal
     if tag in data:
         del data[tag]
-        save_hashtag_data(data)
+        await save_hashtag_data(data)
         await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Dynamic command /{tag} has been disabled.")
         return
     # Static command disabling
     if tag in COMMAND_MAP:
         group_id = str(update.effective_chat.id)
-        disabled = load_disabled_commands()
+        disabled = await load_disabled_commands()
         disabled.setdefault(group_id, [])
         if tag not in disabled[group_id]:
             disabled[group_id].append(tag)
-            save_disabled_commands(disabled)
+            await save_disabled_commands(disabled)
             await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Command /{tag} has been disabled in this group. Admins can re-enable it with /enable {tag}.")
         else:
             await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Command /{tag} is already disabled.")
@@ -1186,13 +1239,13 @@ async def enable_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     command_to_enable = context.args[0].lstrip('/').lower()
     group_id = str(update.effective_chat.id)
-    disabled = load_disabled_commands()
+    disabled = await load_disabled_commands()
 
     if group_id in disabled and command_to_enable in disabled[group_id]:
         disabled[group_id].remove(command_to_enable)
         if not disabled[group_id]:  # Remove group key if list is empty
             del disabled[group_id]
-        save_disabled_commands(disabled)
+        await save_disabled_commands(disabled)
         await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Command /{command_to_enable} has been enabled in this group.")
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Command /{command_to_enable} is not currently disabled.")
@@ -1215,7 +1268,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Update user activity
     if update.effective_user:
-        update_user_activity(update.effective_user.id, chat.id)
+        await update_user_activity(update.effective_user.id, chat.id)
 
     # Prepare the report
     reporting_user = update.effective_user
@@ -1224,8 +1277,8 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reason = " ".join(context.args) if context.args else "No reason provided."
 
     # Use the new get_display_name for respectful naming
-    reporting_user_display = get_display_name(reporting_user.id, reporting_user.full_name)
-    reported_user_display = get_display_name(reported_user.id, reported_user.full_name)
+    reporting_user_display = await get_display_name(reporting_user.id, reporting_user.full_name)
+    reported_user_display = await get_display_name(reported_user.id, reported_user.full_name)
 
     # Create a link to the message
     message_link = f"https://t.me/c/{str(chat.id).replace('-100', '')}/{reported_message.message_id}"
@@ -1329,7 +1382,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Update user activity in groups
     if user and chat and chat.type in ["group", "supergroup"]:
-        update_user_activity(user.id, chat.id)
+        await update_user_activity(user.id, chat.id)
 
     # Define the detailed private start message
     private_start_message = """
@@ -1378,7 +1431,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     # Only show Admin Commands button to admins
-    if is_admin(user_id):
+    if await is_admin(user_id):
         keyboard.append([InlineKeyboardButton("Admin Commands", callback_data='help_admin')])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1409,7 +1462,7 @@ async def help_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - /risk: Take a risk and let fate decide if your media gets posted. (Private chat only)
         """
     elif topic == 'help_admin':
-        if not is_admin(user_id):
+        if not await is_admin(user_id):
             await query.answer("You are not authorized to view this section.", show_alert=True)
             return
 
@@ -1432,7 +1485,7 @@ async def help_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - /seerisk &lt;user_id or @username&gt;: View the risk history of a specific user.
 """
         # Append dynamic hashtag commands if they exist
-        hashtag_data = load_hashtag_data()
+        hashtag_data = await load_hashtag_data()
         if hashtag_data:
             text += "\n<b>Dynamic Hashtag Commands (Admin-only):</b>\n"
             text += '\n'.join(f"/{tag}" for tag in sorted(hashtag_data.keys()))
@@ -1442,7 +1495,7 @@ async def help_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         main_menu_keyboard = [
             [InlineKeyboardButton("General Commands", callback_data='help_general')]
         ]
-        if is_admin(user_id):
+        if await is_admin(user_id):
             main_menu_keyboard.append([InlineKeyboardButton("Admin Commands", callback_data='help_admin')])
 
         await query.edit_message_text(
@@ -1458,11 +1511,11 @@ async def help_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def beowned_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Update user activity for inactivity tracking
     if update.effective_user and update.effective_chat and update.effective_chat.type in ["group", "supergroup"]:
-        update_user_activity(update.effective_user.id, update.effective_chat.id)
+        await update_user_activity(update.effective_user.id, update.effective_chat.id)
     # Check if disabled in this group
     if update.effective_chat.type != "private":
         group_id = str(update.effective_chat.id)
-        disabled = load_disabled_commands()
+        disabled = await load_disabled_commands()
         if 'beowned' in disabled.get(group_id, []):
             return
     await context.bot.send_message(chat_id=update.effective_chat.id, text="If you want to be Lion's property, contact @Lionspridechatbot with a head to toe nude picture of yourself and a clear, concise and complete presentation of yourself.")
@@ -1480,7 +1533,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Update user activity for inactivity tracking
     if message.from_user and message.chat and message.chat.type in ["group", "supergroup"]:
-        update_user_activity(message.from_user.id, message.chat.id)
+        await update_user_activity(message.from_user.id, message.chat.id)
     if message.text:
         response = handle_response(message.text)
         if response:
@@ -1544,10 +1597,10 @@ async def inactive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     days = int(context.args[0].strip())
     group_id = str(update.effective_chat.id)
-    settings = load_inactive_settings()
+    settings = await load_inactive_settings()
     if days == 0:
         settings.pop(group_id, None)
-        save_inactive_settings(settings)
+        await save_inactive_settings(settings)
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Inactive user kicking is now disabled in this group.")
         logger.debug(f"Inactive kicking disabled for group {group_id}")
         return
@@ -1555,7 +1608,7 @@ async def inactive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Please provide a number of days between 1 and 99.")
         return
     settings[group_id] = days
-    save_inactive_settings(settings)
+    await save_inactive_settings(settings)
     await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Inactive user kicking is now enabled for this group. Users inactive for {days} days will be kicked.")
     logger.debug(f"Inactive kicking enabled for group {group_id} with threshold {days} days")
 
@@ -1564,8 +1617,8 @@ async def check_and_kick_inactive_users(app):
     Checks all groups with inactivity kicking enabled and kicks users who have been inactive too long.
     """
     logger.debug("Running periodic inactive user check...")
-    settings = load_inactive_settings()
-    activity = load_activity_data()
+    settings = await load_inactive_settings()
+    activity = await load_activity_data()
     now = int(time.time())
     for group_id, days in settings.items():
         group_activity = activity.get(group_id, {})
