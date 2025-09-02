@@ -453,32 +453,38 @@ async def hashtag_message_handler(update: Update, context: ContextTypes.DEFAULT_
 async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handles dynamic hashtag commands (e.g. /mytag) to retrieve saved messages/media.
-    This acts as a fallback for any command not in COMMAND_MAP.
+    This acts as a fallback for any command not in COMMAND_MAP. It ignores unknown commands.
     """
     if update.effective_chat.type == "private":
-        # This message is not sent because the wrapper deletes the command.
-        # It's better to handle this check inside the command logic if a response is needed.
         return
 
     if not update.message or not update.message.text:
         return
 
+    # This handler should only be triggered for admins, as per original logic.
     member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
     if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
         return  # Silently ignore for non-admins
 
-    command = update.message.text[1:].split('@')[0].split()[0].lower()
+    # Check if the command is addressed to another bot.
+    full_command_text = update.message.text[1:].split()[0]
+    command_parts = full_command_text.split('@')
+    if len(command_parts) > 1 and command_parts[1].lower() != BOT_USERNAME[1:].lower():
+        return  # Command is for another bot, so ignore.
+
+    command = command_parts[0].lower()
 
     # Prevent this handler from hijacking static commands defined in COMMAND_MAP
     if command in COMMAND_MAP:
         return
 
+    # Check if the command is a known hashtag command. If not, silently ignore.
     data = load_hashtag_data()
     if command not in data:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"No data found for #{command}.")
-        logger.debug(f"No data found for command: {command}")
+        logger.debug(f"Unknown command '/{command}' not in hashtag data. Ignoring.")
         return
-    # No admin check: allow all users to use hashtag commands
+
+    # If we are here, it's a valid hashtag command from an admin.
     found = False
     for entry in data[command]:
         # Send all photos
@@ -493,9 +499,11 @@ async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_
         if not entry.get('photos') and not entry.get('videos') and (entry.get('text') or entry.get('caption')):
             await context.bot.send_message(chat_id=update.effective_chat.id, text=entry.get('text') or entry.get('caption'))
             found = True
+
     if not found:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"No saved messages or photos for #{command}.")
-        logger.debug(f"No saved messages or media for command: {command}")
+        # This case might happen if a hashtag exists but has no content (e.g. empty list).
+        # We should not send a message here, to be consistent with ignoring unknown commands.
+        logger.debug(f"No saved messages or media for command: {command}, though tag exists.")
 
 # =============================
 # Risk Command
