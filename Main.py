@@ -14,6 +14,19 @@ from telegram import Update, User, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext, CallbackQueryHandler, ConversationHandler, JobQueue
 from telegram.constants import ChatMemberStatus
 
+# Get the absolute path of the directory where the script is located
+BASE_DIR = Path(__file__).resolve().parent
+
+# Create locks for file access
+FILE_LOCKS = {
+    "risk": asyncio.Lock(),
+    "nicknames": asyncio.Lock(),
+    "admins": asyncio.Lock(),
+    "hashtags": asyncio.Lock(),
+    "activity": asyncio.Lock(),
+    "inactive": asyncio.Lock(),
+    "disabled": asyncio.Lock(),
+
 # =========================
 # Logging Configuration
 # =========================
