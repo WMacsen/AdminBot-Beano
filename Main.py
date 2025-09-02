@@ -10,6 +10,9 @@ import html
 import traceback
 from typing import Final
 import uuid
+from pathlib import Path
+import asyncio
+from functools import wraps
 from telegram import Update, User, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext, CallbackQueryHandler, ConversationHandler, JobQueue
 from telegram.constants import ChatMemberStatus
@@ -26,6 +29,7 @@ FILE_LOCKS = {
     "activity": asyncio.Lock(),
     "inactive": asyncio.Lock(),
     "disabled": asyncio.Lock(),
+}
 
 # =========================
 # Logging Configuration
@@ -34,7 +38,7 @@ logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("bot.log", encoding='utf-8'),
+        logging.FileHandler(BASE_DIR / "bot.log", encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -54,9 +58,8 @@ TOKEN = os.environ.get('TELEGRAM_TOKEN')
 BOT_USERNAME: Final = '@MasterBeanoBot'  # Bot's username (update if needed)
 
 # File paths for persistent data storage
-HASHTAG_DATA_FILE = 'hashtag_data.json'  # Stores hashtagged messages/media
-ADMIN_DATA_FILE = 'admins.json'          # Stores admin/owner info
-from functools import wraps
+HASHTAG_DATA_FILE = BASE_DIR / 'hashtag_data.json'
+ADMIN_DATA_FILE = BASE_DIR / 'admins.json'
 OWNER_ID = 7237569475  # Your Telegram ID (change to your actual Telegram user ID)
 
 
@@ -115,9 +118,9 @@ def command_handler_wrapper(admin_only=False):
 # =============================
 # Admin/Owner Data Management
 # =============================
-ADMIN_NICKNAMES_FILE = 'admin_nicknames.json'
-RISK_DATA_FILE = 'risk_data.json'
-CONDITIONS_DATA_FILE = 'conditions.json'
+ADMIN_NICKNAMES_FILE = BASE_DIR / 'admin_nicknames.json'
+RISK_DATA_FILE = BASE_DIR / 'risk_data.json'
+CONDITIONS_DATA_FILE = BASE_DIR / 'conditions.json'
 
 def load_risk_data():
     if os.path.exists(RISK_DATA_FILE):
@@ -441,15 +444,14 @@ def save_hashtag_data(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
     logger.debug(f"Saved hashtag data: {list(data.keys())}")
 
-import asyncio
 import time
 
 
 # =============================
 # Inactivity Tracking & Settings
 # =============================
-ACTIVITY_DATA_FILE = 'activity.json'  # Tracks last activity per user per group
-INACTIVE_SETTINGS_FILE = 'inactive_settings.json'  # Stores inactivity threshold per group
+ACTIVITY_DATA_FILE = BASE_DIR / 'activity.json'
+INACTIVE_SETTINGS_FILE = BASE_DIR / 'inactive_settings.json'
 
 def load_activity_data():
     if os.path.exists(ACTIVITY_DATA_FILE):
@@ -1420,7 +1422,7 @@ async def command_list_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await context.bot.send_message(chat_id=update.effective_chat.id, text=msg, parse_mode='HTML')
 
 # Persistent storage for disabled commands per group
-DISABLED_COMMANDS_FILE = 'disabled_commands.json'
+DISABLED_COMMANDS_FILE = BASE_DIR / 'disabled_commands.json'
 
 def load_disabled_commands():
     if os.path.exists(DISABLED_COMMANDS_FILE):
