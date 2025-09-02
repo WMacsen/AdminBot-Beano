@@ -996,7 +996,10 @@ async def purge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         )
     confirmation_message += "Are you sure you want to proceed?"
 
-    keyboard = [[InlineKeyboardButton("Yes, I'm sure. Delete them.", callback_data='purge_confirm'), InlineKeyboardButton("No, cancel.", callback_data='purge_cancel')]]
+    keyboard = [
+        [InlineKeyboardButton("Yes, I'm sure. Delete them.", callback_data='purge_confirm')],
+        [InlineKeyboardButton("No, cancel.", callback_data='purge_cancel')]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(confirmation_message, reply_markup=reply_markup, parse_mode='HTML')
     return CONFIRM_PURGE
