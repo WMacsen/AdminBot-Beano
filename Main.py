@@ -590,7 +590,7 @@ async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_
 # =============================
 
 # States for ConversationHandler
-SELECT_GROUP, AWAIT_MEDIA = range(2)
+SELECT_GROUP, AWAIT_MEDIA, AWAIT_BEGGING = range(3)
 
 # States for Post ConversationHandler
 SELECT_POST_GROUP, AWAIT_POST_MEDIA, AWAIT_POST_CAPTION, CONFIRM_POST = range(2, 6)
@@ -704,11 +704,71 @@ async def receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TY
         'timestamp': int(time.time()),
         'posted_message_id': None
     }
+    risk_data.setdefault(str(user.id), []).append(new_risk)
+    save_risk_data(risk_data)
 
     if risk_failed:
-        caption = f"{user.mention_html()} decided to risk fate and failed miserably! 😈"
-        posted_message = None
+        # Store data for the begging step
+        context.user_data['risk_id_to_beg_for'] = risk_id
+
+        keyboard = [
+            [
+                InlineKeyboardButton("Please post me anyway Sir 🙏", callback_data=f'beg_post_yes'),
+                InlineKeyboardButton("Thanks Sir", callback_data=f'beg_post_no')
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.message.reply_text(
+            "You were not lucky... your media has been selected for posting. 😈\n"
+            "Do you want to beg me to post it anyway?",
+            reply_markup=reply_markup
+        )
+        return AWAIT_BEGGING
+    else:
+        await update.message.reply_text(f"You were lucky! Your {media_type} will not be posted... this time.")
+        # Clean up and end conversation
+        if 'risk_group_id' in context.user_data:
+            del context.user_data['risk_group_id']
+        return ConversationHandler.END
+
+async def beg_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the user's decision to beg for a failed risk to be posted."""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    decision = query.data
+
+    # Clean up the buttons from the original message
+    await query.edit_message_reply_markup(reply_markup=None)
+
+    if decision == 'beg_post_no':
+        await query.edit_message_text("As you wish. Your secret is safe... for now.")
+    elif decision == 'beg_post_yes':
+        risk_id_to_post = context.user_data.get('risk_id_to_beg_for')
+        if not risk_id_to_post:
+            await query.edit_message_text("I seem to have lost the details of your risk. Please start over with /risk.")
+            # End of conversation cleanup will happen finally
+            return ConversationHandler.END
+
+        risk_data = load_risk_data()
+        user_risks = risk_data.get(str(user_id), [])
+        target_risk = next((r for r in user_risks if r['risk_id'] == risk_id_to_post), None)
+
+        if not target_risk:
+            await query.edit_message_text("An error occurred: I could not find the risk data to post.")
+            return ConversationHandler.END
+
+        user_mention = query.from_user.mention_html()
+        caption = f"{user_mention} BEGGED me to be posted without mercy 😈"
+
         try:
+            media_type = target_risk['media_type']
+            file_id = target_risk['file_id']
+            group_id = target_risk['group_id']
+
+            posted_message = None
             if media_type == 'photo':
                 posted_message = await context.bot.send_photo(group_id, file_id, caption=caption, parse_mode='HTML')
             elif media_type == 'video':
@@ -717,21 +777,21 @@ async def receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 posted_message = await context.bot.send_voice(group_id, file_id, caption=caption, parse_mode='HTML')
 
             if posted_message:
-                new_risk['posted_message_id'] = posted_message.message_id
+                target_risk['posted_message_id'] = posted_message.message_id
+                save_risk_data(risk_data)
 
-            await update.message.reply_text("You were not lucky... your media has been posted to the group.")
+            await query.edit_message_text("You begged well enough. Your media has been posted.")
+
         except Exception as e:
-            logger.error(f"Failed to post risk media for user {user.id} to group {group_id}: {e}")
-            await update.message.reply_text("I couldn't post your media to the group. It might have been deleted or I may not have permission.")
-    else:
-        await update.message.reply_text(f"You were lucky! Your {media_type} will not be posted... this time.")
+            logger.error(f"Failed to post begged risk {risk_id_to_post} for user {user_id}: {e}")
+            await query.edit_message_text("I couldn't post your media. Perhaps my permissions in the group have changed.")
 
-    risk_data.setdefault(str(user.id), []).append(new_risk)
-    save_risk_data(risk_data)
-
-    # Clean up and end conversation
+    # Clean up user_data for this conversation
     if 'risk_group_id' in context.user_data:
         del context.user_data['risk_group_id']
+    if 'risk_id_to_beg_for' in context.user_data:
+        del context.user_data['risk_id_to_beg_for']
+
     return ConversationHandler.END
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1852,6 +1912,7 @@ if __name__ == '__main__':
         states={
             SELECT_GROUP: [CallbackQueryHandler(select_group_callback, pattern='^risk_group_')],
             AWAIT_MEDIA: [MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE, receive_media_handler)],
+            AWAIT_BEGGING: [CallbackQueryHandler(beg_callback_handler, pattern='^beg_post_')],
         },
         fallbacks=[CommandHandler('cancel', cancel_command)],
         per_message=False,
