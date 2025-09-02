@@ -1628,6 +1628,7 @@ async def help_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - /beowned: Information on how to be owned.
 - /admin: Request help from admins in a group.
 - /risk: Take a risk and let fate decide if your media gets posted. (Private chat only)
+- /purge: Delete all of your previously posted risks. (Private chat only)
         """
     elif topic == 'help_admin':
         if not is_admin(user_id):
@@ -1651,6 +1652,9 @@ async def help_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 <u>Risk & History</u>
 - /seerisk &lt;user_id or @username&gt;: View the risk history of a specific user.
+- /addcondition &lt;text&gt;: Adds a condition for the /purge command. (Owner only)
+- /listconditions: Lists all purge conditions. (Owner only)
+- /removecondition &lt;id&gt;: Removes a purge condition. (Owner only)
 """
         # Append dynamic hashtag commands if they exist
         hashtag_data = load_hashtag_data()
