@@ -104,6 +104,7 @@ def command_handler_wrapper(admin_only=False):
 # =============================
 ADMIN_NICKNAMES_FILE = 'admin_nicknames.json'
 RISK_DATA_FILE = 'risk_data.json'
+CONDITIONS_DATA_FILE = 'conditions.json'
 
 def load_risk_data():
     if os.path.exists(RISK_DATA_FILE):
@@ -113,6 +114,16 @@ def load_risk_data():
 
 def save_risk_data(data):
     with open(RISK_DATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def load_conditions_data():
+    if os.path.exists(CONDITIONS_DATA_FILE):
+        with open(CONDITIONS_DATA_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+def save_conditions_data(data):
+    with open(CONDITIONS_DATA_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 def load_admin_nicknames():
@@ -208,6 +219,75 @@ async def removenickname_command(update: Update, context: ContextTypes.DEFAULT_T
         await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Nickname for {target_user_info} has been removed.", parse_mode='HTML')
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text="This user does not have a nickname set.")
+
+
+@command_handler_wrapper(admin_only=True)
+async def addcondition_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Only the owner can use this command.")
+        return
+
+    if not context.args:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Usage: /addcondition <text of the condition>")
+        return
+
+    condition_text = " ".join(context.args)
+    conditions = load_conditions_data()
+
+    if not isinstance(conditions, list):
+        conditions = []
+
+    new_condition = {
+        'id': uuid.uuid4().hex[:5],
+        'text': condition_text
+    }
+    conditions.append(new_condition)
+    save_conditions_data(conditions)
+
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"✅ Condition added with ID: `{new_condition['id']}`", parse_mode='HTML')
+
+@command_handler_wrapper(admin_only=True)
+async def listconditions_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Only the owner can use this command.")
+        return
+
+    conditions = load_conditions_data()
+    if not conditions or not isinstance(conditions, list):
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="No conditions have been set.")
+        return
+
+    message = "📜 <b>Current Conditions</b>\n\n"
+    for cond in conditions:
+        message += f"- <b>ID: {cond['id']}</b>\n  <i>{html.escape(cond['text'])}</i>\n\n"
+
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=message, parse_mode='HTML')
+
+
+@command_handler_wrapper(admin_only=True)
+async def removecondition_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Only the owner can use this command.")
+        return
+
+    if not context.args:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Usage: /removecondition <condition_id>")
+        return
+
+    condition_id_to_remove = context.args[0]
+    conditions = load_conditions_data()
+
+    if not isinstance(conditions, list):
+        conditions = []
+
+    initial_count = len(conditions)
+    conditions = [c for c in conditions if c.get('id') != condition_id_to_remove]
+
+    if len(conditions) < initial_count:
+        save_conditions_data(conditions)
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"✅ Condition with ID `{condition_id_to_remove}` has been removed.", parse_mode='HTML')
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ Could not find a condition with ID `{condition_id_to_remove}`.", parse_mode='HTML')
 
 
 @command_handler_wrapper(admin_only=True)
@@ -515,6 +595,9 @@ SELECT_GROUP, AWAIT_MEDIA = range(2)
 # States for Post ConversationHandler
 SELECT_POST_GROUP, AWAIT_POST_MEDIA, AWAIT_POST_CAPTION, CONFIRM_POST = range(2, 6)
 
+# States for Purge ConversationHandler
+CONFIRM_PURGE, AWAIT_CONDITION_VERIFICATION = range(6, 8)
+
 
 async def risk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the /risk conversation. Asks user to select a group."""
@@ -618,20 +701,23 @@ async def receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TY
         'media_type': media_type,
         'file_id': file_id,
         'posted': risk_failed,
-        'timestamp': int(time.time())
+        'timestamp': int(time.time()),
+        'posted_message_id': None
     }
-    risk_data.setdefault(str(user.id), []).append(new_risk)
-    save_risk_data(risk_data)
 
     if risk_failed:
         caption = f"{user.mention_html()} decided to risk fate and failed miserably! 😈"
+        posted_message = None
         try:
             if media_type == 'photo':
-                await context.bot.send_photo(group_id, file_id, caption=caption, parse_mode='HTML')
+                posted_message = await context.bot.send_photo(group_id, file_id, caption=caption, parse_mode='HTML')
             elif media_type == 'video':
-                await context.bot.send_video(group_id, file_id, caption=caption, parse_mode='HTML')
+                posted_message = await context.bot.send_video(group_id, file_id, caption=caption, parse_mode='HTML')
             elif media_type == 'voice':
-                await context.bot.send_voice(group_id, file_id, caption=caption, parse_mode='HTML')
+                posted_message = await context.bot.send_voice(group_id, file_id, caption=caption, parse_mode='HTML')
+
+            if posted_message:
+                new_risk['posted_message_id'] = posted_message.message_id
 
             await update.message.reply_text("You were not lucky... your media has been posted to the group.")
         except Exception as e:
@@ -639,6 +725,9 @@ async def receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TY
             await update.message.reply_text("I couldn't post your media to the group. It might have been deleted or I may not have permission.")
     else:
         await update.message.reply_text(f"You were lucky! Your {media_type} will not be posted... this time.")
+
+    risk_data.setdefault(str(user.id), []).append(new_risk)
+    save_risk_data(risk_data)
 
     # Clean up and end conversation
     if 'risk_group_id' in context.user_data:
@@ -806,8 +895,217 @@ async def post_risk_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 # =============================
+# Purge Command (Big Red Button)
+# =============================
+
+async def _do_purge(user_id: int, user_data: dict, context: ContextTypes.DEFAULT_TYPE):
+    """Helper function to perform the actual deletion of risks."""
+    risks_to_purge = user_data.get('risks_to_purge', [])
+    if not risks_to_purge:
+        await context.bot.send_message(chat_id=user_id, text="An internal error occurred: No risks found to purge.")
+        return
+
+    success_count = 0
+    failure_count = 0
+    risk_data = load_risk_data()
+    user_risks = risk_data.get(str(user_id), [])
+
+    for risk_to_delete in risks_to_purge:
+        group_id = risk_to_delete['group_id']
+        message_id = risk_to_delete['posted_message_id']
+        risk_id = risk_to_delete['risk_id']
+
+        try:
+            await context.bot.delete_message(chat_id=int(group_id), message_id=int(message_id))
+            logger.info(f"Successfully deleted message {message_id} in group {group_id} for user {user_id}.")
+            success_count += 1
+        except Exception as e:
+            logger.error(f"Failed to delete message {message_id} in group {group_id} for user {user_id}: {e}")
+            failure_count += 1
+        finally:
+            for r in user_risks:
+                if r['risk_id'] == risk_id:
+                    r['posted'] = False
+                    r['posted_message_id'] = None
+                    break
+
+    save_risk_data(risk_data)
+
+    summary_message = f"✅ Deletion complete.\n\nSuccessfully deleted: {success_count} posts.\nFailed to delete: {failure_count} posts."
+    if failure_count > 0:
+        summary_message += "\n\n(Failures can happen if a message was already deleted or if I no longer have permission to delete messages in that group.)"
+
+    await context.bot.send_message(chat_id=user_id, text=summary_message)
+
+
+async def purge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Starts the /purge conversation to delete all posted risks."""
+    if update.effective_chat.type != "private":
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="The /purge command is only available in private chat."
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=update.effective_user.id,
+                text="Please use the /purge command here to start the process."
+            )
+        except Exception:
+            pass
+        return ConversationHandler.END
+
+    user = update.effective_user
+    risk_data = load_risk_data()
+    user_risks = risk_data.get(str(user.id), [])
+
+    risks_to_delete = [r for r in user_risks if r.get('posted') and r.get('posted_message_id')]
+
+    if not risks_to_delete:
+        await update.message.reply_text("You have no posted risks to delete.")
+        return ConversationHandler.END
+
+    disabled_commands = load_disabled_commands()
+    enabled_groups_risks = []
+    disabled_groups_info = set()
+
+    for risk in risks_to_delete:
+        group_id = risk['group_id']
+        if 'purge' in disabled_commands.get(group_id, []):
+            try:
+                chat = await context.bot.get_chat(int(group_id))
+                disabled_groups_info.add(chat.title)
+            except Exception:
+                disabled_groups_info.add(f"Group ID {group_id}")
+        else:
+            enabled_groups_risks.append(risk)
+
+    if not enabled_groups_risks:
+        await update.message.reply_text("The purge feature is currently disabled in all groups where you have posted risks. An admin must enable it with `/enable purge` in the group.")
+        return ConversationHandler.END
+
+    context.user_data['risks_to_purge'] = enabled_groups_risks
+
+    confirmation_message = (
+        f"🚨 *Warning!* 🚨\n\n"
+        f"You are about to delete **{len(enabled_groups_risks)}** of your posted risks. This action is irreversible.\n\n"
+    )
+    if disabled_groups_info:
+        confirmation_message += (
+            f"This will not affect risks posted in the following groups where the command is disabled:\n"
+            f"- {', '.join(sorted(list(disabled_groups_info)))}\n\n"
+        )
+    confirmation_message += "Are you sure you want to proceed?"
+
+    keyboard = [[InlineKeyboardButton("Yes, I'm sure. Delete them.", callback_data='purge_confirm'), InlineKeyboardButton("No, cancel.", callback_data='purge_cancel')]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(confirmation_message, reply_markup=reply_markup, parse_mode='HTML')
+    return CONFIRM_PURGE
+
+async def send_random_condition(user: User, user_data: dict, context: ContextTypes.DEFAULT_TYPE):
+    """Selects a random condition, sends it to the user, and notifies admins."""
+    conditions = load_conditions_data()
+    if not conditions or not isinstance(conditions, list):
+        await context.bot.send_message(chat_id=user.id, text="No conditions found. Proceeding with deletion.")
+        await _do_purge(user.id, user_data, context)
+        return ConversationHandler.END
+
+    condition = random.choice(conditions)
+    user_data['current_condition'] = condition
+
+    await context.bot.send_message(
+        chat_id=user.id,
+        text=f"An admin has been sent the following condition to verify:\n\n<b>Condition:</b> {html.escape(condition['text'])}\n\nPlease wait for an admin to confirm that you have met this condition.",
+        parse_mode='HTML'
+    )
+
+    risks_to_purge = user_data.get('risks_to_purge', [])
+    group_ids = {r['group_id'] for r in risks_to_purge}
+    admin_ids = set()
+    admin_data = load_admin_data()
+    for admin_id, groups in admin_data.items():
+        if any(g in group_ids for g in groups):
+            admin_ids.add(int(admin_id))
+    if is_owner(OWNER_ID):
+        admin_ids.add(OWNER_ID)
+
+    keyboard = [[InlineKeyboardButton("✅ Approve", callback_data=f"purge_verify_approve_{user.id}"), InlineKeyboardButton("❌ Deny", callback_data=f"purge_verify_deny_{user.id}")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    notification_text = (
+        f"🚨 <b>Purge Verification Request</b> 🚨\n\n"
+        f"User {user.mention_html()} (<code>{user.id}</code>) is requesting to purge their risks.\n\n"
+        f"<b>Condition to verify:</b>\n<i>{html.escape(condition['text'])}</i>\n\n"
+        f"Please confirm whether the user has met this condition."
+    )
+    for admin_id in admin_ids:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=notification_text, reply_markup=reply_markup, parse_mode='HTML')
+        except Exception as e:
+            logger.warning(f"Failed to send purge verification to admin {admin_id}: {e}")
+    return AWAIT_CONDITION_VERIFICATION
+
+async def purge_confirmation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the user's confirmation for purging risks."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == 'purge_cancel':
+        await query.edit_message_text("Operation cancelled. Your risks have not been deleted.")
+        context.user_data.pop('risks_to_purge', None)
+        return ConversationHandler.END
+
+    await query.edit_message_text("Confirmed. Checking for deletion conditions...")
+
+    conditions = load_conditions_data()
+    if conditions and isinstance(conditions, list):
+        return await send_random_condition(query.from_user, context.user_data, context)
+    else:
+        await context.bot.send_message(chat_id=query.from_user.id, text="No conditions found. Proceeding with deletion.")
+        await _do_purge(query.from_user.id, context.user_data, context)
+        context.user_data.pop('risks_to_purge', None)
+        return ConversationHandler.END
+
+
+# =============================
 # /post Command Conversation
 # =============================
+
+async def purge_verification_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles an admin's verification of a purge condition."""
+    query = update.callback_query
+    await query.answer()
+
+    admin_user = query.from_user
+    try:
+        _, _, decision, user_id_str = query.data.split('_')
+        user_id = int(user_id_str)
+    except (ValueError, IndexError):
+        await query.edit_message_text("Error: Invalid callback data.")
+        return
+
+    user_data = context.application.user_data.get(user_id)
+    if not user_data or 'risks_to_purge' not in user_data:
+        await query.edit_message_text(text="This purge request is no longer valid or has been cancelled by the user.")
+        return
+
+    original_message_text = query.message.text
+
+    if decision == 'approve':
+        await query.edit_message_text(text=f"{original_message_text}\n\n---\n✅ Approved by {admin_user.mention_html()}", parse_mode='HTML')
+        await context.bot.send_message(chat_id=user_id, text="An admin has approved your request. The deletion process will now begin.")
+
+        await _do_purge(user_id, user_data, context)
+
+        user_data.pop('risks_to_purge', None)
+        user_data.pop('current_condition', None)
+
+    elif decision == 'deny':
+        await query.edit_message_text(text=f"{original_message_text}\n\n---\n❌ Denied by {admin_user.mention_html()}", parse_mode='HTML')
+        await context.bot.send_message(chat_id=user_id, text="An admin has denied your request. You will now be given a new condition.")
+
+        user_object = await context.bot.get_chat(user_id)
+        await send_random_condition(user_object, user_data, context)
+
+
 async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the /post conversation. Asks admin to select a group to post in."""
     user_id = update.effective_user.id
@@ -995,7 +1293,8 @@ COMMAND_MAP = {
     'link': {'is_admin': True}, 'inactive': {'is_admin': True}, 'post': {'is_admin': True},
     'setnickname': {'is_admin': True}, 'removenickname': {'is_admin': True},
     'enable': {'is_admin': True}, 'update': {'is_admin': True}, 'risk': {'is_admin': False},
-    'seerisk': {'is_admin': True},
+    'seerisk': {'is_admin': True}, 'purge': {'is_admin': False},
+    'addcondition': {'is_admin': True}, 'listconditions': {'is_admin': True}, 'removecondition': {'is_admin': True},
 }
 
 @command_handler_wrapper(admin_only=False)
@@ -1575,6 +1874,19 @@ if __name__ == '__main__':
     )
     app.add_handler(post_conv_handler)
 
+    # Conversation handler for the /purge command
+    purge_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('purge', purge_command)],
+        states={
+            CONFIRM_PURGE: [CallbackQueryHandler(purge_confirmation_callback, pattern='^purge_confirm$|^purge_cancel$')],
+            AWAIT_CONDITION_VERIFICATION: [], # User waits in this state for admin action
+        },
+        fallbacks=[CommandHandler('cancel', cancel_command)],
+        per_message=False,
+        per_user=True
+    )
+    app.add_handler(purge_conv_handler)
+
     # Register all commands using the new helper
     add_command(app, 'cancel', cancel_command)
     add_command(app, 'start', start_command)
@@ -1587,14 +1899,19 @@ if __name__ == '__main__':
     add_command(app, 'inactive', inactive_command)
     add_command(app, 'setnickname', setnickname_command)
     add_command(app, 'removenickname', removenickname_command)
+    add_command(app, 'addcondition', addcondition_command)
+    add_command(app, 'listconditions', listconditions_command)
+    add_command(app, 'removecondition', removecondition_command)
     add_command(app, 'enable', enable_command)
     add_command(app, 'update', update_command)
     add_command(app, 'seerisk', seerisk_command)
     add_command(app, 'risk', risk_command)
     add_command(app, 'post', post_command)
+    add_command(app, 'purge', purge_command)
 
     app.add_handler(CallbackQueryHandler(help_menu_handler, pattern=r'^help_'))
     app.add_handler(CallbackQueryHandler(post_risk_callback, pattern=r'^postrisk_'))
+    app.add_handler(CallbackQueryHandler(purge_verification_callback, pattern=r'^purge_verify_'))
 
     # Fallback handler for dynamic hashtag commands.
     # The group=1 makes it lower priority than the static commands registered with add_command (which are in the default group 0)
