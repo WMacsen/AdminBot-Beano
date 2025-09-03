@@ -679,7 +679,7 @@ async def select_group_callback(update: Update, context: ContextTypes.DEFAULT_TY
     return AWAIT_MEDIA
 
 async def receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the media, performs the risk, and saves the data."""
+    """Handles the media, performs the risk based on new logic, and saves the data."""
     user = update.effective_user
     group_id = context.user_data.get('risk_group_id')
 
@@ -705,13 +705,16 @@ async def receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("That's not a valid media type. Please send a photo, video, or voice note.")
         return AWAIT_MEDIA
 
-    # The risk: 50/50 chance
-    risk_failed = random.choice([True, False])
-    logger.debug(f"Risk check for user {user.id} in group {group_id}. risk_failed={risk_failed}")
+    # True = Unlucky = Post the media
+    # False = Lucky = Do not post the media (but offer buttons)
+    should_post_automatically = random.choice([True, False])
+    logger.debug(f"Risk check for user {user.id} in group {group_id}. should_post_automatically={should_post_automatically}")
 
-    # Save the risk data first
     risk_data = load_risk_data()
     risk_id = uuid.uuid4().hex
+
+    # The 'risk_failed' flag now correctly represents the user's perspective:
+    # True means they were unlucky and got posted. False means they were lucky.
     new_risk = {
         'risk_id': risk_id,
         'user_id': user.id,
@@ -719,17 +722,51 @@ async def receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TY
         'group_id': group_id,
         'media_type': media_type,
         'file_id': file_id,
-        'risk_failed': risk_failed,
+        'risk_failed': should_post_automatically,
         'timestamp': int(time.time()),
         'posted_message_id': None
     }
-    risk_data.setdefault(str(user.id), []).append(new_risk)
-    save_risk_data(risk_data)
 
-    if risk_failed:
-        logger.debug(f"User {user.id} failed risk check. Preparing to send 'beg' buttons.")
-        # Store data for the begging step
+    if should_post_automatically:
+        # UNLUCKY CASE: Post automatically
+        logger.debug(f"User {user.id} was unlucky. Automatically posting media to group {group_id}.")
+        user_mention = user.mention_html()
+        caption = f"{user_mention} decided to risk fate and failed miserably! 😈"
+
+        posted_message = None
+        try:
+            if media_type == 'photo':
+                posted_message = await context.bot.send_photo(group_id, file_id, caption=caption, parse_mode='HTML')
+            elif media_type == 'video':
+                posted_message = await context.bot.send_video(group_id, file_id, caption=caption, parse_mode='HTML')
+            elif media_type == 'voice':
+                posted_message = await context.bot.send_voice(group_id, file_id, caption=caption, parse_mode='HTML')
+
+            if posted_message:
+                new_risk['posted_message_id'] = posted_message.message_id
+                await update.message.reply_text("You were unlucky! Your media has been posted.")
+            else:
+                # This case should be rare, but handle it.
+                await update.message.reply_text("You were unlucky... but I failed to post your media. Your secret is safe for now.")
+
+        except Exception as e:
+            logger.error(f"Failed to automatically post risk {risk_id} for user {user.id}: {e}")
+            await update.message.reply_text("You were unlucky... but I couldn't post your media. Perhaps my permissions in the group have changed.")
+
+        # Save data and end conversation
+        risk_data.setdefault(str(user.id), []).append(new_risk)
+        save_risk_data(risk_data)
+        context.user_data.pop('risk_group_id', None)
+        return ConversationHandler.END
+
+    else:
+        # LUCKY CASE: Don't post, but show buttons
+        logger.debug(f"User {user.id} was lucky. Preparing to send 'beg' buttons.")
         context.user_data['risk_id_to_beg_for'] = risk_id
+
+        # Save the risk data now, even if not posted yet
+        risk_data.setdefault(str(user.id), []).append(new_risk)
+        save_risk_data(risk_data)
 
         keyboard = [
             [InlineKeyboardButton("Please post me anyway Sir 🙏", callback_data='beg_post_yes')],
@@ -738,17 +775,11 @@ async def receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TY
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.message.reply_text(
-            "You were not lucky... your media has been selected for posting. 😈\n"
-            "Do you want to beg me to post it anyway?",
+            f"You were lucky! Your {media_type} will not be posted... this time.\n"
+            "Unless you want to beg me to post it anyway? 😉",
             reply_markup=reply_markup
         )
         return AWAIT_BEGGING
-    else:
-        await update.message.reply_text(f"You were lucky! Your {media_type} will not be posted... this time.")
-        # Clean up and end conversation
-        if 'risk_group_id' in context.user_data:
-            del context.user_data['risk_group_id']
-        return ConversationHandler.END
 
 async def beg_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handles the user's decision to beg for a failed risk to be posted."""
