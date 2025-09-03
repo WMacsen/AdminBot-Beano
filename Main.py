@@ -15,6 +15,7 @@ import uuid
 from telegram import Update, User, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext, CallbackQueryHandler, ConversationHandler, JobQueue
 from telegram.constants import ChatMemberStatus
+from dotenv import load_dotenv
 
 # Get the absolute path of the directory where the script is located
 BASE_DIR = Path(__file__).resolve().parent
@@ -53,6 +54,7 @@ logger = logging.getLogger(__name__)
 logger.debug(f"Environment variables: {os.environ}")
 
 # Load the Telegram bot token from environment variable
+load_dotenv()
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 BOT_USERNAME: Final = '@MasterBeanoBot'  # Bot's username (update if needed)
 
