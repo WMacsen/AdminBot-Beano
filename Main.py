@@ -707,6 +707,7 @@ async def receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     # The risk: 50/50 chance
     risk_failed = random.choice([True, False])
+    logger.debug(f"Risk check for user {user.id} in group {group_id}. risk_failed={risk_failed}")
 
     # Save the risk data first
     risk_data = load_risk_data()
@@ -718,7 +719,7 @@ async def receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TY
         'group_id': group_id,
         'media_type': media_type,
         'file_id': file_id,
-        'posted': risk_failed,
+        'risk_failed': risk_failed,
         'timestamp': int(time.time()),
         'posted_message_id': None
     }
@@ -726,6 +727,7 @@ async def receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TY
     save_risk_data(risk_data)
 
     if risk_failed:
+        logger.debug(f"User {user.id} failed risk check. Preparing to send 'beg' buttons.")
         # Store data for the begging step
         context.user_data['risk_id_to_beg_for'] = risk_id
 
@@ -878,7 +880,13 @@ async def seerisk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from datetime import datetime
         ts = datetime.fromtimestamp(risk['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
 
-        status = "Already Posted" if risk['posted'] else "Not Posted"
+        # Compatibility for old data: check for 'risk_failed' first, then fall back to 'posted'
+        risk_failed_flag = risk.get('risk_failed', risk.get('posted'))
+
+        risk_outcome = "Failed" if risk_failed_flag else "Passed"
+        post_status = "Posted" if risk.get('posted_message_id') else "Not Posted"
+
+        status = f"Risk: {risk_outcome}, Status: {post_status}"
 
         caption = (
             f"Risk taken on: {ts}\n"
@@ -887,7 +895,8 @@ async def seerisk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         keyboard = []
-        if not risk['posted']:
+        # Allow posting only if the risk was failed and it's not already posted.
+        if risk_failed_flag and not risk.get('posted_message_id'):
             callback_data = f"postrisk_{risk['user_id']}_{risk['risk_id']}"
             keyboard.append([InlineKeyboardButton("Post Now", callback_data=callback_data)])
 
@@ -931,7 +940,7 @@ async def post_risk_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("Error: Could not find this risk. It may have been deleted.")
         return
 
-    if target_risk['posted']:
+    if target_risk.get('posted_message_id'):
         await query.edit_message_text("This risk has already been posted.")
         return
 
@@ -948,20 +957,22 @@ async def post_risk_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         file_id = target_risk['file_id']
         group_id = target_risk['group_id']
 
+        posted_message = None
         if media_type == 'photo':
-            await context.bot.send_photo(group_id, file_id, caption=caption, parse_mode='HTML')
+            posted_message = await context.bot.send_photo(group_id, file_id, caption=caption, parse_mode='HTML')
         elif media_type == 'video':
-            await context.bot.send_video(group_id, file_id, caption=caption, parse_mode='HTML')
+            posted_message = await context.bot.send_video(group_id, file_id, caption=caption, parse_mode='HTML')
         elif media_type == 'voice':
-            await context.bot.send_voice(group_id, file_id, caption=caption, parse_mode='HTML')
+            posted_message = await context.bot.send_voice(group_id, file_id, caption=caption, parse_mode='HTML')
 
         # Update the risk data
-        target_risk['posted'] = True
+        if posted_message:
+            target_risk['posted_message_id'] = posted_message.message_id
         save_risk_data(risk_data)
 
         # Update the admin's message
         original_caption = query.message.caption
-        new_caption = original_caption.replace("Status: Not Posted", "Status: ✅ Posted by Admin")
+        new_caption = original_caption.replace("Status: Not Posted", "Status: Posted")
         await query.edit_message_caption(caption=new_caption, reply_markup=None)
         await context.bot.send_message(chat_id=query.message.chat_id, text="Media has been posted to the group.")
 
@@ -999,9 +1010,9 @@ async def _do_purge(user_id: int, user_data: dict, context: ContextTypes.DEFAULT
             logger.error(f"Failed to delete message {message_id} in group {group_id} for user {user_id}: {e}")
             failure_count += 1
         finally:
+            # Only update the specific risk entry, don't change the outcome history
             for r in user_risks:
                 if r['risk_id'] == risk_id:
-                    r['posted'] = False
                     r['posted_message_id'] = None
                     break
 
@@ -1034,7 +1045,7 @@ async def purge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     risk_data = load_risk_data()
     user_risks = risk_data.get(str(user.id), [])
 
-    risks_to_delete = [r for r in user_risks if r.get('posted') and r.get('posted_message_id')]
+    risks_to_delete = [r for r in user_risks if r.get('posted_message_id')]
 
     if not risks_to_delete:
         await update.message.reply_text("You have no posted risks to delete.")
