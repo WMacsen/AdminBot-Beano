@@ -730,10 +730,8 @@ async def receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data['risk_id_to_beg_for'] = risk_id
 
         keyboard = [
-            [
-                InlineKeyboardButton("Please post me anyway Sir 🙏", callback_data='beg_post_yes'),
-                InlineKeyboardButton("Thanks Sir", callback_data='beg_post_no')
-            ]
+            [InlineKeyboardButton("Please post me anyway Sir 🙏", callback_data='beg_post_yes')],
+            [InlineKeyboardButton("Thanks Sir", callback_data='beg_post_no')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -742,11 +740,6 @@ async def receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TY
             "Do you want to beg me to post it anyway?",
             reply_markup=reply_markup
         )
-        await update.message.reply_text(
-            "You were not lucky... your media has been selected for posting. 😈\n"
-            "Do you want to beg me to post it anyway?",
-            reply_markup=reply_markup
-)
         return AWAIT_BEGGING
     else:
         await update.message.reply_text(f"You were lucky! Your {media_type} will not be posted... this time.")
