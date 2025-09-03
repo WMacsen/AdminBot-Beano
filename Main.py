@@ -647,7 +647,8 @@ async def risk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
         try:
             chat = await context.bot.get_chat(int(group_id))
-            keyboard.append([InlineKeyboardButton(chat.title, callback_data=f"risk_group_{group_id}")])
+            if chat and chat.title:
+                keyboard.append([InlineKeyboardButton(chat.title, callback_data=f"risk_group_{group_id}")])
         except Exception as e:
             logger.warning(f"Could not fetch chat info for group {group_id}: {e}")
 
@@ -825,7 +826,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             context.user_data.pop(key, None)
         message_to_send = "The post creation process has been cancelled."
 
-    await update.message.reply_text(message_to_send)
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=message_to_send)
 
     # End the conversation
     return ConversationHandler.END
