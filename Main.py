@@ -241,71 +241,104 @@ async def removenickname_command(update: Update, context: ContextTypes.DEFAULT_T
 
 @command_handler_wrapper(admin_only=True)
 async def addcondition_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update.effective_user.id):
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="Only the owner can use this command.")
+    chat = update.effective_chat
+    if chat.type not in ['group', 'supergroup']:
+        await context.bot.send_message(chat_id=chat.id, text="This command can only be used in a group chat.")
         return
 
     if not context.args:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="Usage: /addcondition <text of the condition>")
+        await context.bot.send_message(chat_id=chat.id, text="Usage: /addcondition <text of the condition>")
         return
 
     condition_text = " ".join(context.args)
-    conditions = load_conditions_data()
+    group_id = str(chat.id)
 
-    if not isinstance(conditions, list):
-        conditions = []
+    conditions_data = load_conditions_data()
+    if not isinstance(conditions_data, dict):
+        # If the old data is a list, we start fresh to avoid data corruption.
+        # A more sophisticated migration could be implemented if needed.
+        conditions_data = {}
+
+    group_conditions = conditions_data.get(group_id, [])
 
     new_condition = {
         'id': uuid.uuid4().hex[:5],
         'text': condition_text
     }
-    conditions.append(new_condition)
-    save_conditions_data(conditions)
+    group_conditions.append(new_condition)
+    conditions_data[group_id] = group_conditions
+    save_conditions_data(conditions_data)
 
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"✅ Condition added with ID: `{new_condition['id']}`", parse_mode='HTML')
+    await context.bot.send_message(chat_id=chat.id, text=f"✅ Condition added with ID: `{new_condition['id']}` for this group.", parse_mode='HTML')
 
 @command_handler_wrapper(admin_only=True)
 async def listconditions_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update.effective_user.id):
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="Only the owner can use this command.")
+    chat = update.effective_chat
+    if chat.type not in ['group', 'supergroup']:
+        await context.bot.send_message(chat_id=chat.id, text="This command can only be used in a group chat.")
         return
 
-    conditions = load_conditions_data()
-    if not conditions or not isinstance(conditions, list):
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="No conditions have been set.")
+    group_id = str(chat.id)
+    conditions_data = load_conditions_data()
+
+    if not isinstance(conditions_data, dict):
+        # Handle case where data might be in the old list format or non-existent
+        await context.bot.send_message(chat_id=chat.id, text="No conditions have been set for this group.")
         return
 
-    message = "📜 <b>Current Conditions</b>\n\n"
-    for cond in conditions:
+    group_conditions = conditions_data.get(group_id, [])
+
+    if not group_conditions:
+        await context.bot.send_message(chat_id=chat.id, text="No conditions have been set for this group.")
+        return
+
+    message = "📜 <b>Current Conditions for this Group</b>\n\n"
+    for cond in group_conditions:
         message += f"- <b>ID: {cond['id']}</b>\n  <i>{html.escape(cond['text'])}</i>\n\n"
 
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=message, parse_mode='HTML')
+    await context.bot.send_message(chat_id=chat.id, text=message, parse_mode='HTML')
 
 
 @command_handler_wrapper(admin_only=True)
 async def removecondition_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update.effective_user.id):
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="Only the owner can use this command.")
+    chat = update.effective_chat
+    if chat.type not in ['group', 'supergroup']:
+        await context.bot.send_message(chat_id=chat.id, text="This command can only be used in a group chat.")
         return
 
     if not context.args:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="Usage: /removecondition <condition_id>")
+        await context.bot.send_message(chat_id=chat.id, text="Usage: /removecondition <condition_id>")
         return
 
     condition_id_to_remove = context.args[0]
-    conditions = load_conditions_data()
+    group_id = str(chat.id)
+    conditions_data = load_conditions_data()
 
-    if not isinstance(conditions, list):
-        conditions = []
+    if not isinstance(conditions_data, dict):
+        # Data is not in the expected format, so there's nothing to remove.
+        await context.bot.send_message(chat_id=chat.id, text=f"❌ Could not find a condition with ID `{condition_id_to_remove}` in this group.", parse_mode='HTML')
+        return
 
-    initial_count = len(conditions)
-    conditions = [c for c in conditions if c.get('id') != condition_id_to_remove]
+    group_conditions = conditions_data.get(group_id, [])
+    if not group_conditions:
+        await context.bot.send_message(chat_id=chat.id, text=f"❌ Could not find a condition with ID `{condition_id_to_remove}` in this group.", parse_mode='HTML')
+        return
 
-    if len(conditions) < initial_count:
-        save_conditions_data(conditions)
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"✅ Condition with ID `{condition_id_to_remove}` has been removed.", parse_mode='HTML')
+    initial_count = len(group_conditions)
+    # Filter out the condition to be removed
+    group_conditions = [c for c in group_conditions if c.get('id') != condition_id_to_remove]
+
+    if len(group_conditions) < initial_count:
+        if group_conditions:
+            # If there are remaining conditions, update the list for the group
+            conditions_data[group_id] = group_conditions
+        else:
+            # If no conditions are left, remove the group entry entirely
+            del conditions_data[group_id]
+        save_conditions_data(conditions_data)
+        await context.bot.send_message(chat_id=chat.id, text=f"✅ Condition with ID `{condition_id_to_remove}` has been removed from this group.", parse_mode='HTML')
     else:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ Could not find a condition with ID `{condition_id_to_remove}`.", parse_mode='HTML')
+        await context.bot.send_message(chat_id=chat.id, text=f"❌ Could not find a condition with ID `{condition_id_to_remove}` in this group.", parse_mode='HTML')
 
 
 @command_handler_wrapper(admin_only=True)
@@ -1082,13 +1115,13 @@ async def purge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         await update.message.reply_text("You have no posted risks to delete.")
         return ConversationHandler.END
 
+    # Filter out risks from groups where /purge is disabled
     disabled_commands = load_disabled_commands()
     enabled_groups_risks = []
     disabled_groups_info = set()
-
     for risk in risks_to_delete:
         group_id = risk['group_id']
-        if 'purge' in disabled_commands.get(group_id, []):
+        if 'purge' in disabled_commands.get(str(group_id), []):
             try:
                 chat = await context.bot.get_chat(int(group_id))
                 disabled_groups_info.add(chat.title)
@@ -1101,33 +1134,74 @@ async def purge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         await update.message.reply_text("The purge feature is currently disabled in all groups where you have posted risks. An admin must enable it with `/enable purge` in the group.")
         return ConversationHandler.END
 
-    context.user_data['risks_to_purge'] = enabled_groups_risks
+    # Categorize risks based on whether their group has conditions
+    conditions_data = load_conditions_data()
+    risks_with_conditions = []
+    risks_without_conditions = []
+    for risk in enabled_groups_risks:
+        group_id = risk['group_id']
+        # Ensure conditions_data is a dict and the group has a non-empty list of conditions
+        if isinstance(conditions_data, dict) and group_id in conditions_data and conditions_data[group_id]:
+            risks_with_conditions.append(risk)
+        else:
+            risks_without_conditions.append(risk)
 
+    context.user_data['risks_with_conditions'] = risks_with_conditions
+    context.user_data['risks_without_conditions'] = risks_without_conditions
+
+    # Build the confirmation message
+    total_count = len(enabled_groups_risks)
     confirmation_message = (
-        f"🚨 *Warning!* 🚨\n\n"
-        f"You are about to delete **{len(enabled_groups_risks)}** of your posted risks. This action is irreversible.\n\n"
+        f"🚨 <b>Warning!</b> 🚨\n\n"
+        f"You are about to delete <b>{total_count}</b> of your posted risks. This action is irreversible.\n\n"
     )
+
+    if risks_without_conditions:
+        confirmation_message += f"• <b>{len(risks_without_conditions)}</b> risks from groups with no conditions will be deleted immediately.\n"
+    if risks_with_conditions:
+        confirmation_message += f"• <b>{len(risks_with_conditions)}</b> risks from groups with conditions will require admin verification.\n"
+
     if disabled_groups_info:
         confirmation_message += (
-            f"This will not affect risks posted in the following groups where the command is disabled:\n"
+            f"\nThis will not affect risks posted in the following groups where the command is disabled:\n"
             f"- {', '.join(sorted(list(disabled_groups_info)))}\n\n"
         )
-    confirmation_message += "Are you sure you want to proceed?"
+
+    confirmation_message += "\nAre you sure you want to proceed?"
 
     keyboard = [[InlineKeyboardButton("Yes, I'm sure. Delete them.", callback_data='purge_confirm'), InlineKeyboardButton("No, cancel.", callback_data='purge_cancel')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(confirmation_message, reply_markup=reply_markup, parse_mode='HTML')
+
     return CONFIRM_PURGE
 
 async def send_random_condition(user: User, user_data: dict, context: ContextTypes.DEFAULT_TYPE):
-    """Selects a random condition, sends it to the user, and notifies admins."""
-    conditions = load_conditions_data()
-    if not conditions or not isinstance(conditions, list):
-        await context.bot.send_message(chat_id=user.id, text="No conditions found. Proceeding with deletion.")
-        await _do_purge(user.id, user_data, context)
+    """Selects a random condition from applicable groups, sends it to the user, and notifies admins."""
+    risks_to_purge = user_data.get('risks_to_purge', []) # These are now only the risks with conditions
+    if not risks_to_purge:
+        # This should not happen if called correctly, but as a safeguard:
+        await context.bot.send_message(chat_id=user.id, text="No risks requiring a condition were found to purge.")
         return ConversationHandler.END
 
-    condition = random.choice(conditions)
+    # Collect all conditions from the groups where the risks are
+    group_ids_with_risks = {risk['group_id'] for risk in risks_to_purge}
+    conditions_data = load_conditions_data()
+    applicable_conditions = []
+    if isinstance(conditions_data, dict):
+        for group_id in group_ids_with_risks:
+            if group_id in conditions_data:
+                applicable_conditions.extend(conditions_data[group_id])
+
+    # If no conditions are found for any of the relevant groups, purge directly.
+    if not applicable_conditions:
+        await context.bot.send_message(chat_id=user.id, text="No conditions found for the relevant groups. Proceeding with deletion.")
+        await _do_purge(user.id, user_data, context)
+        # Clean up user_data
+        user_data.pop('risks_to_purge', None)
+        user_data.pop('risks_with_conditions', None)
+        return ConversationHandler.END
+
+    condition = random.choice(applicable_conditions)
     user_data['current_condition'] = condition
 
     await context.bot.send_message(
@@ -1136,7 +1210,7 @@ async def send_random_condition(user: User, user_data: dict, context: ContextTyp
         parse_mode='HTML'
     )
 
-    risks_to_purge = user_data.get('risks_to_purge', [])
+    # The rest of the logic for notifying admins remains the same, as it's already based on the groups from risks_to_purge
     group_ids = {r['group_id'] for r in risks_to_purge}
     admin_ids = set()
     admin_data = load_admin_data()
@@ -1159,27 +1233,41 @@ async def send_random_condition(user: User, user_data: dict, context: ContextTyp
             await context.bot.send_message(chat_id=admin_id, text=notification_text, reply_markup=reply_markup, parse_mode='HTML')
         except Exception as e:
             logger.warning(f"Failed to send purge verification to admin {admin_id}: {e}")
+
     return AWAIT_CONDITION_VERIFICATION
 
 async def purge_confirmation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the user's confirmation for purging risks."""
+    """Handles the user's confirmation for purging risks, separating conditional and non-conditional purges."""
     query = update.callback_query
     await query.answer()
+    user = query.from_user
 
     if query.data == 'purge_cancel':
         await query.edit_message_text("Operation cancelled. Your risks have not been deleted.")
-        context.user_data.pop('risks_to_purge', None)
+        context.user_data.pop('risks_with_conditions', None)
+        context.user_data.pop('risks_without_conditions', None)
         return ConversationHandler.END
 
-    await query.edit_message_text("Confirmed. Checking for deletion conditions...")
+    await query.edit_message_text("Confirmed. Processing request...")
 
-    conditions = load_conditions_data()
-    if conditions and isinstance(conditions, list):
-        return await send_random_condition(query.from_user, context.user_data, context)
+    risks_with_conditions = context.user_data.get('risks_with_conditions', [])
+    risks_without_conditions = context.user_data.get('risks_without_conditions', [])
+
+    # Immediately purge risks from groups without conditions
+    if risks_without_conditions:
+        temp_user_data = {'risks_to_purge': risks_without_conditions}
+        await _do_purge(user.id, temp_user_data, context)
+        context.user_data.pop('risks_without_conditions')
+
+    # Now, handle risks from groups that have conditions
+    if risks_with_conditions:
+        # Set the remaining risks as the ones to be purged for the next step
+        context.user_data['risks_to_purge'] = risks_with_conditions
+        return await send_random_condition(user, context.user_data, context)
     else:
-        await context.bot.send_message(chat_id=query.from_user.id, text="No conditions found. Proceeding with deletion.")
-        await _do_purge(query.from_user.id, context.user_data, context)
-        context.user_data.pop('risks_to_purge', None)
+        # If there were no risks with conditions, we're done.
+        await context.bot.send_message(chat_id=user.id, text="All applicable risks have been processed.")
+        context.user_data.pop('risks_with_conditions', None)
         return ConversationHandler.END
 
 
@@ -1213,8 +1301,10 @@ async def purge_verification_callback(update: Update, context: ContextTypes.DEFA
 
         await _do_purge(user_id, user_data, context)
 
+        # Clean up all related data after the final step
         user_data.pop('risks_to_purge', None)
         user_data.pop('current_condition', None)
+        user_data.pop('risks_with_conditions', None)
 
     elif decision == 'deny':
         await query.edit_message_text(text=f"{original_message_text}\n\n---\n❌ Denied by {admin_user.mention_html()}", parse_mode='HTML')
