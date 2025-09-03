@@ -26,6 +26,7 @@ FILE_LOCKS = {
     "activity": asyncio.Lock(),
     "inactive": asyncio.Lock(),
     "disabled": asyncio.Lock(),
+}
 
 # =========================
 # Logging Configuration
