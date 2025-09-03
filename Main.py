@@ -8,6 +8,8 @@ import re
 import random
 import html
 import traceback
+import asyncio
+from pathlib import Path
 from typing import Final
 import uuid
 from telegram import Update, User, InlineKeyboardButton, InlineKeyboardMarkup
@@ -26,6 +28,7 @@ FILE_LOCKS = {
     "activity": asyncio.Lock(),
     "inactive": asyncio.Lock(),
     "disabled": asyncio.Lock(),
+}
 
 # =========================
 # Logging Configuration
