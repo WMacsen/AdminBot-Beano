@@ -1709,7 +1709,7 @@ async def post_confirmation_callback(update: Update, context: ContextTypes.DEFAU
 COMMAND_MAP = {
     'start': {'is_admin': False}, 'help': {'is_admin': False}, 'beowned': {'is_admin': False},
     'command': {'is_admin': False}, 'disable': {'is_admin': True}, 'admin': {'is_admin': False},
-    'link': {'is_admin': True}, 'inactive': {'is_admin': True}, 'post': {'is_admin': True},
+    'link': {'is_admin': False}, 'inactive': {'is_admin': True}, 'post': {'is_admin': True},
     'setnickname': {'is_admin': True}, 'removenickname': {'is_admin': True}, 'allban': {'is_admin': True}, 'random': {'is_admin': True},
     'enable': {'is_admin': True}, 'update': {'is_admin': True}, 'risk': {'is_admin': False},
     'seerisk': {'is_admin': True}, 'purge': {'is_admin': False},
@@ -1919,7 +1919,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("Could not notify any admins. Please ensure the bot has the correct permissions.")
 
 
-@command_handler_wrapper(admin_only=True)
+@command_handler_wrapper(admin_only=False)
 async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /link (admin only): Creates a single-use invite link for the group.
@@ -2044,6 +2044,7 @@ async def help_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 <b>General Commands</b>
 - /help: Shows this help menu.
 - /command: Lists all available commands in the current group.
+- /link: Generates a single-use invite link for the group.
 - /beowned: Information on how to be owned.
 - /admin: Request help from admins in a group.
 - /risk: Take a risk and let fate decide if your media gets posted. (Private chat only)
@@ -2063,7 +2064,6 @@ async def help_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - /post: Create a post with media and a caption to send to a group where you are an admin. (Private chat only)
 - /disable &lt;command&gt;: Disables a static command or a dynamic hashtag command in the current group.
 - /enable &lt;command&gt;: Re-enables a disabled static command.
-- /link: Generates a single-use invite link for the group.
 - /inactive &lt;days&gt;: Sets up automatic kicking for users who are inactive for a specified number of days (e.g., /inactive 30). Use 0 to disable.
 
 <u>Admin & User Identity</u>
