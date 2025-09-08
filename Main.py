@@ -30,6 +30,8 @@ FILE_LOCKS = {
     "activity": asyncio.Lock(),
     "inactive": asyncio.Lock(),
     "disabled": asyncio.Lock(),
+    "timer": asyncio.Lock(),
+    "no_delete": asyncio.Lock(),
 }
 
 # =========================
@@ -62,7 +64,29 @@ BOT_USERNAME: Final = '@MasterBeanoBot'  # Bot's username (update if needed)
 # File paths for persistent data storage
 HASHTAG_DATA_FILE = BASE_DIR / 'hashtag_data.json'
 ADMIN_DATA_FILE = BASE_DIR / 'admins.json'
+TIMER_SETTINGS_FILE = BASE_DIR / 'timer_settings.json'
+NO_DELETE_IDS_FILE = BASE_DIR / 'no_delete_ids.json'
 OWNER_ID = 7237569475  # Your Telegram ID (change to your actual Telegram user ID)
+
+def load_timer_settings():
+    if os.path.exists(TIMER_SETTINGS_FILE):
+        with open(TIMER_SETTINGS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+def save_timer_settings(data):
+    with open(TIMER_SETTINGS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def load_no_delete_ids():
+    if os.path.exists(NO_DELETE_IDS_FILE):
+        with open(NO_DELETE_IDS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return []
+
+def save_no_delete_ids(data):
+    with open(NO_DELETE_IDS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 # =========================
@@ -207,7 +231,7 @@ async def setnickname_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Fallback to user ID if we can't get chat member info
         pass
 
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Nickname for {target_user_info} has been set to '{nickname}'.", parse_mode='HTML')
+    await send_deletable_message(context, update.effective_chat.id, text=f"Nickname for {target_user_info} has been set to '{nickname}'.", parse_mode='HTML')
 
 @command_handler_wrapper(admin_only=True)
 async def removenickname_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -245,9 +269,9 @@ async def removenickname_command(update: Update, context: ContextTypes.DEFAULT_T
             # Fallback to user ID if we can't get chat member info
             pass
 
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Nickname for {target_user_info} has been removed.", parse_mode='HTML')
+        await send_deletable_message(context, update.effective_chat.id, text=f"Nickname for {target_user_info} has been removed.", parse_mode='HTML')
     else:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="This user does not have a nickname set.")
+        await send_deletable_message(context, update.effective_chat.id, text="This user does not have a nickname set.")
 
 
 @command_handler_wrapper(admin_only=True)
@@ -310,7 +334,7 @@ async def allban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     successful_bans = []
     failed_bans = []
 
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Processing all-ban for {target_user_info}. This may take a moment...", parse_mode='HTML')
+    await send_deletable_message(context, update.effective_chat.id, text=f"Processing all-ban for {target_user_info}. This may take a moment...", parse_mode='HTML')
 
     for group_id in all_group_ids:
         if 'allban' in disabled_cmds.get(str(group_id), []):
@@ -338,7 +362,7 @@ async def allban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not successful_bans and not failed_bans:
         summary_message = f"Could not perform the ban. Either the bot is not in any groups or the `/allban` command is disabled in all of them."
 
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=summary_message, parse_mode='HTML')
+    await send_deletable_message(context, update.effective_chat.id, text=summary_message, parse_mode='HTML')
 
 
 @command_handler_wrapper(admin_only=True)
@@ -355,17 +379,17 @@ async def random_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         settings = load_random_risk_settings()
         group_id_str = str(chat.id)
         current_percentage = settings.get(group_id_str, 0)
-        await context.bot.send_message(chat_id=chat.id, text=f"The current random risk chance is {current_percentage}%. Use `/random <percentage>` to change it.")
+        await send_deletable_message(context, chat.id, text=f"The current random risk chance is {current_percentage}%. Use `/random <percentage>` to change it.")
         return
 
     try:
         percentage = float(context.args[0])
     except ValueError:
-        await context.bot.send_message(chat_id=chat.id, text="Invalid percentage. Please provide a number.")
+        await send_deletable_message(context, chat.id, text="Invalid percentage. Please provide a number.")
         return
 
     if not (0 <= percentage <= 100):
-        await context.bot.send_message(chat_id=chat.id, text="Percentage must be between 0 and 100.")
+        await send_deletable_message(context, chat.id, text="Percentage must be between 0 and 100.")
         return
 
     settings = load_random_risk_settings()
@@ -375,13 +399,13 @@ async def random_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if group_id_str in settings:
             del settings[group_id_str]
             save_random_risk_settings(settings)
-            await context.bot.send_message(chat_id=chat.id, text="Automatic random risk posting has been disabled for this group.")
+            await send_deletable_message(context, chat.id, text="Automatic random risk posting has been disabled for this group.")
         else:
-            await context.bot.send_message(chat_id=chat.id, text="Automatic random risk posting is already disabled for this group.")
+            await send_deletable_message(context, chat.id, text="Automatic random risk posting is already disabled for this group.")
     else:
         settings[group_id_str] = percentage
         save_random_risk_settings(settings)
-        await context.bot.send_message(chat_id=chat.id, text=f"Automatic random risk chance has been set to {percentage}% for this group. Checks will occur every 30 minutes.")
+        await send_deletable_message(context, chat.id, text=f"Automatic random risk chance has been set to {percentage}% for this group. Checks will occur every 30 minutes.")
 
 
 @command_handler_wrapper(admin_only=True)
@@ -414,7 +438,7 @@ async def addcondition_command(update: Update, context: ContextTypes.DEFAULT_TYP
     conditions_data[group_id] = group_conditions
     save_conditions_data(conditions_data)
 
-    await context.bot.send_message(chat_id=chat.id, text=f"✅ Condition added with ID: `{new_condition['id']}` for this group.", parse_mode='HTML')
+    await send_deletable_message(context, chat.id, text=f"✅ Condition added with ID: `{new_condition['id']}` for this group.", parse_mode='HTML')
 
 @command_handler_wrapper(admin_only=True)
 async def listconditions_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -434,14 +458,14 @@ async def listconditions_command(update: Update, context: ContextTypes.DEFAULT_T
     group_conditions = conditions_data.get(group_id, [])
 
     if not group_conditions:
-        await context.bot.send_message(chat_id=chat.id, text="No conditions have been set for this group.")
+        await send_deletable_message(context, chat.id, text="No conditions have been set for this group.")
         return
 
     message = "📜 <b>Current Conditions for this Group</b>\n\n"
     for cond in group_conditions:
         message += f"- <b>ID: {cond['id']}</b>\n  <i>{html.escape(cond['text'])}</i>\n\n"
 
-    await context.bot.send_message(chat_id=chat.id, text=message, parse_mode='HTML')
+    await send_deletable_message(context, chat.id, text=message, parse_mode='HTML')
 
 
 @command_handler_wrapper(admin_only=True)
@@ -481,9 +505,9 @@ async def removecondition_command(update: Update, context: ContextTypes.DEFAULT_
             # If no conditions are left, remove the group entry entirely
             del conditions_data[group_id]
         save_conditions_data(conditions_data)
-        await context.bot.send_message(chat_id=chat.id, text=f"✅ Condition with ID `{condition_id_to_remove}` has been removed from this group.", parse_mode='HTML')
+        await send_deletable_message(context, chat.id, text=f"✅ Condition with ID `{condition_id_to_remove}` has been removed from this group.", parse_mode='HTML')
     else:
-        await context.bot.send_message(chat_id=chat.id, text=f"❌ Could not find a condition with ID `{condition_id_to_remove}` in this group.", parse_mode='HTML')
+        await send_deletable_message(context, chat.id, text=f"❌ Could not find a condition with ID `{condition_id_to_remove}` in this group.", parse_mode='HTML')
 
 
 @command_handler_wrapper(admin_only=True)
@@ -545,7 +569,7 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message_parts.append("No changes were needed.")
 
     message = "\n".join(message_parts)
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=message)
+    await send_deletable_message(context, update.effective_chat.id, text=message)
 
 
 def load_admin_data():
@@ -798,14 +822,16 @@ CONFIRM_PURGE, AWAIT_CONDITION_VERIFICATION = range(6, 8)
 async def risk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the /risk conversation. Asks user to select a group."""
     if update.effective_chat.type != "private":
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
+        await send_deletable_message(
+            context,
+            update.effective_chat.id,
             text="The /risk command is only available in private chat."
         )
         # Attempt to start a private message instead
         try:
-            await context.bot.send_message(
-                chat_id=update.effective_user.id,
+            await send_deletable_message(
+                context,
+                update.effective_user.id,
                 text="Please use the /risk command here."
             )
         except Exception:
@@ -814,7 +840,7 @@ async def risk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     admin_data = load_admin_data()
     if not admin_data:
-        await update.message.reply_text("The bot is not yet configured in any groups. Please use /update in a group first.")
+        await send_deletable_message(context, update.effective_chat.id, text="The bot is not yet configured in any groups. Please use /update in a group first.")
         return ConversationHandler.END
 
     all_group_ids = {group for groups in admin_data.values() for group in groups}
@@ -832,11 +858,11 @@ async def risk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             logger.warning(f"Could not fetch chat info for group {group_id}: {e}")
 
     if not keyboard:
-        await update.message.reply_text("There are no groups available for the /risk command right now.")
+        await send_deletable_message(context, update.effective_chat.id, text="There are no groups available for the /risk command right now.")
         return ConversationHandler.END
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Choose a group where you want to risk your fate:", reply_markup=reply_markup)
+    await send_deletable_message(context, update.effective_chat.id, "Choose a group where you want to risk your fate:", reply_markup=reply_markup)
     return SELECT_GROUP
 
 async def select_group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -862,7 +888,7 @@ async def receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TY
     group_id = context.user_data.get('risk_group_id')
 
     if not group_id:
-        await update.message.reply_text("Something went wrong. Your group selection was lost. Please start over with /risk.")
+        await send_deletable_message(context, update.effective_chat.id, text="Something went wrong. Your group selection was lost. Please start over with /risk.")
         return ConversationHandler.END
 
     message = update.message
@@ -880,7 +906,7 @@ async def receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TY
         file_id = message.voice.file_id
 
     if not media_type:
-        await update.message.reply_text("That's not a valid media type. Please send a photo, video, or voice note.")
+        await send_deletable_message(context, update.effective_chat.id, text="That's not a valid media type. Please send a photo, video, or voice note.")
         return AWAIT_MEDIA
 
     # True = Unlucky = Post the media
@@ -922,14 +948,14 @@ async def receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
             if posted_message:
                 new_risk['posted_message_id'] = posted_message.message_id
-                await update.message.reply_text("You were unlucky! Your media has been posted.")
+                await send_deletable_message(context, update.effective_chat.id, text="You were unlucky! Your media has been posted.")
             else:
                 # This case should be rare, but handle it.
-                await update.message.reply_text("You were unlucky... but I failed to post your media. Your secret is safe for now.")
+                await send_deletable_message(context, update.effective_chat.id, text="You were unlucky... but I failed to post your media. Your secret is safe for now.")
 
         except Exception as e:
             logger.error(f"Failed to automatically post risk {risk_id} for user {user.id}: {e}")
-            await update.message.reply_text("You were unlucky... but I couldn't post your media. Perhaps my permissions in the group have changed.")
+            await send_deletable_message(context, update.effective_chat.id, text="You were unlucky... but I couldn't post your media. Perhaps my permissions in the group have changed.")
 
         # Save data and end conversation
         risk_data.setdefault(str(user.id), []).append(new_risk)
@@ -952,9 +978,11 @@ async def receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TY
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await update.message.reply_text(
-            f"You were lucky! Your {media_type} will not be posted... this time.\n"
-            "Unless you want to beg me to post it anyway? 😉",
+        await send_deletable_message(
+            context,
+            update.effective_chat.id,
+            text=f"You were lucky! Your {media_type} will not be posted... this time.\n"
+                 "Unless you want to beg me to post it anyway? 😉",
             reply_markup=reply_markup
         )
         return AWAIT_BEGGING
@@ -1036,7 +1064,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             context.user_data.pop(key, None)
         message_to_send = "The post creation process has been cancelled."
 
-    await update.message.reply_text(message_to_send)
+    await send_deletable_message(context, update.effective_chat.id, text=message_to_send)
 
     # End the conversation
     return ConversationHandler.END
@@ -1048,7 +1076,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def seerisk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin command to see all risks taken by a specific user."""
     if not context.args:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="Usage: /seerisk <user_id or @username>")
+        await send_deletable_message(context, update.effective_chat.id, text="Usage: /seerisk <user_id or @username>")
         return
 
     target_arg = context.args[0]
@@ -1063,21 +1091,21 @@ async def seerisk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 target_user_id = user_id_str
                 break
         if not target_user_id:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"No risk data found for username {target_arg}.")
+            await send_deletable_message(context, update.effective_chat.id, text=f"No risk data found for username {target_arg}.")
             return
     elif target_arg.isdigit():
         target_user_id = target_arg
     else:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="Invalid input. Please provide a valid user ID or a @username.")
+        await send_deletable_message(context, update.effective_chat.id, text="Invalid input. Please provide a valid user ID or a @username.")
         return
 
     user_risks = risk_data.get(target_user_id)
 
     if not user_risks:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"No risk data found for user ID {target_user_id}.")
+        await send_deletable_message(context, update.effective_chat.id, text=f"No risk data found for user ID {target_user_id}.")
         return
 
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Found {len(user_risks)} risk(s) for user ID {target_user_id}:")
+    await send_deletable_message(context, update.effective_chat.id, text=f"Found {len(user_risks)} risk(s) for user ID {target_user_id}:")
 
     for risk in user_risks:
         try:
@@ -1126,7 +1154,7 @@ async def seerisk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif media_type == 'voice':
                 await context.bot.send_voice(update.effective_chat.id, file_id, caption=caption, reply_markup=reply_markup)
         except Exception as e:
-            await context.bot.send_message(update.effective_chat.id, text=f"Could not retrieve media for a risk from {ts}. It might be too old or deleted. Error: {e}")
+            await send_deletable_message(context, update.effective_chat.id, text=f"Could not retrieve media for a risk from {ts}. It might be too old or deleted. Error: {e}")
 
 
 async def post_risk_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1187,11 +1215,11 @@ async def post_risk_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         original_caption = query.message.caption
         new_caption = original_caption.replace("Status: Not Posted", "Status: Posted")
         await query.edit_message_caption(caption=new_caption, reply_markup=None)
-        await context.bot.send_message(chat_id=query.message.chat_id, text="Media has been posted to the group.")
+        await send_deletable_message(context, query.message.chat_id, text="Media has been posted to the group.")
 
     except Exception as e:
         logger.error(f"Admin failed to post risk {risk_id} for user {user_id}: {e}")
-        await context.bot.send_message(chat_id=query.message.chat_id, text=f"Failed to post media: {e}")
+        await send_deletable_message(context, query.message.chat_id, text=f"Failed to post media: {e}")
 
 
 async def post_risk_with_taunt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1239,7 +1267,7 @@ async def post_risk_with_taunt_callback(update: Update, context: ContextTypes.DE
             target_risk['posted_message_id'] = posted_message.message_id
             save_risk_data(risk_data)
 
-        await context.bot.send_message(chat_id=query.message.chat_id, text="Media has been posted to the group with a taunt.")
+        await send_deletable_message(context, query.message.chat_id, text="Media has been posted to the group with a taunt.")
 
         # Update the original message to remove the buttons
         await query.edit_message_reply_markup(reply_markup=None)
@@ -1253,7 +1281,7 @@ async def post_risk_with_taunt_callback(update: Update, context: ContextTypes.DE
             error_message = "Failed to post: I am no longer in that group."
 
         logger.error(f"Admin failed to post taunt risk {risk_id} for user {user_id}: {e}")
-        await context.bot.send_message(chat_id=query.message.chat_id, text=error_message)
+        await send_deletable_message(context, query.message.chat_id, text=error_message)
 
 
 # =============================
@@ -1297,19 +1325,21 @@ async def _do_purge(user_id: int, user_data: dict, context: ContextTypes.DEFAULT
     if failure_count > 0:
         summary_message += "\n\n(Failures can happen if a message was already deleted or if I no longer have permission to delete messages in that group.)"
 
-    await context.bot.send_message(chat_id=user_id, text=summary_message)
+    await send_deletable_message(context, user_id, text=summary_message)
 
 
 async def purge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the /purge conversation to delete all posted risks."""
     if update.effective_chat.type != "private":
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
+        await send_deletable_message(
+            context,
+            update.effective_chat.id,
             text="The /purge command is only available in private chat."
         )
         try:
-            await context.bot.send_message(
-                chat_id=update.effective_user.id,
+            await send_deletable_message(
+                context,
+                update.effective_user.id,
                 text="Please use the /purge command here to start the process."
             )
         except Exception:
@@ -1323,7 +1353,7 @@ async def purge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     risks_to_delete = [r for r in user_risks if r.get('posted_message_id')]
 
     if not risks_to_delete:
-        await update.message.reply_text("You have no posted risks to delete.")
+        await send_deletable_message(context, update.effective_chat.id, text="You have no posted risks to delete.")
         return ConversationHandler.END
 
     # Filter out risks from groups where /purge is disabled
@@ -1342,7 +1372,7 @@ async def purge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             enabled_groups_risks.append(risk)
 
     if not enabled_groups_risks:
-        await update.message.reply_text("The purge feature is currently disabled in all groups where you have posted risks. An admin must enable it with `/enable purge` in the group.")
+        await send_deletable_message(context, update.effective_chat.id, text="The purge feature is currently disabled in all groups where you have posted risks. An admin must enable it with `/enable purge` in the group.")
         return ConversationHandler.END
 
     # Categorize risks based on whether their group has conditions
@@ -1382,7 +1412,7 @@ async def purge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     keyboard = [[InlineKeyboardButton("Yes, I'm sure. Delete them.", callback_data='purge_confirm'), InlineKeyboardButton("No, cancel.", callback_data='purge_cancel')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(confirmation_message, reply_markup=reply_markup, parse_mode='HTML')
+    await send_deletable_message(context, update.effective_chat.id, text=confirmation_message, reply_markup=reply_markup, parse_mode='HTML')
 
     return CONFIRM_PURGE
 
@@ -1415,8 +1445,9 @@ async def send_random_condition(user: User, user_data: dict, context: ContextTyp
     condition = random.choice(applicable_conditions)
     user_data['current_condition'] = condition
 
-    await context.bot.send_message(
-        chat_id=user.id,
+    await send_deletable_message(
+        context,
+        user.id,
         text=f"An admin has been sent the following condition to verify:\n\n<b>Condition:</b> {html.escape(condition['text'])}\n\nPlease wait for an admin to confirm that you have met this condition.",
         parse_mode='HTML'
     )
@@ -1508,7 +1539,7 @@ async def purge_verification_callback(update: Update, context: ContextTypes.DEFA
 
     if decision == 'approve':
         await query.edit_message_text(text=f"{original_message_text}\n\n---\n✅ Approved by {admin_user.mention_html()}", parse_mode='HTML')
-        await context.bot.send_message(chat_id=user_id, text="An admin has approved your request. The deletion process will now begin.")
+        await send_deletable_message(context, user_id, text="An admin has approved your request. The deletion process will now begin.")
 
         await _do_purge(user_id, user_data, context)
 
@@ -1519,7 +1550,7 @@ async def purge_verification_callback(update: Update, context: ContextTypes.DEFA
 
     elif decision == 'deny':
         await query.edit_message_text(text=f"{original_message_text}\n\n---\n❌ Denied by {admin_user.mention_html()}", parse_mode='HTML')
-        await context.bot.send_message(chat_id=user_id, text="An admin has denied your request. You will now be given a new condition.")
+        await send_deletable_message(context, user_id, text="An admin has denied your request. You will now be given a new condition.")
 
         user_object = await context.bot.get_chat(user_id)
         await send_random_condition(user_object, user_data, context)
@@ -1529,13 +1560,15 @@ async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     """Starts the /post conversation. Asks admin to select a group to post in."""
     user_id = update.effective_user.id
     if update.effective_chat.type != "private":
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
+        await send_deletable_message(
+            context,
+            update.effective_chat.id,
             text="The /post command is only available in private chat."
         )
         try:
-            await context.bot.send_message(
-                chat_id=user_id,
+            await send_deletable_message(
+                context,
+                user_id,
                 text="Please use the /post command here to start creating a post."
             )
         except Exception:
@@ -1543,7 +1576,7 @@ async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         return ConversationHandler.END
 
     if not is_admin(user_id):
-        await update.message.reply_text("This is an admin-only command. You are not authorized.")
+        await send_deletable_message(context, update.effective_chat.id, text="This is an admin-only command. You are not authorized.")
         return ConversationHandler.END
 
     admin_data = load_admin_data()
@@ -1552,7 +1585,7 @@ async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     user_admin_groups = admin_data.get(str(user_id), [])
 
     if not user_admin_groups:
-        await update.message.reply_text("You are not registered as an admin in any groups that I'm aware of. Try running /update in a group where you are an admin.")
+        await send_deletable_message(context, update.effective_chat.id, text="You are not registered as an admin in any groups that I'm aware of. Try running /update in a group where you are an admin.")
         return ConversationHandler.END
 
     disabled_data = load_disabled_commands()
@@ -1569,11 +1602,11 @@ async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             logger.warning(f"Could not fetch chat info for group {group_id} for /post command: {e}")
 
     if not keyboard:
-        await update.message.reply_text("There are no available groups for you to post in. The /post command may be disabled in the groups where you are an admin.")
+        await send_deletable_message(context, update.effective_chat.id, text="There are no available groups for you to post in. The /post command may be disabled in the groups where you are an admin.")
         return ConversationHandler.END
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Please choose a group to post your message in:", reply_markup=reply_markup)
+    await send_deletable_message(context, update.effective_chat.id, text="Please choose a group to post your message in:", reply_markup=reply_markup)
     return SELECT_POST_GROUP
 
 async def select_post_group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1606,20 +1639,20 @@ async def receive_post_media_handler(update: Update, context: ContextTypes.DEFAU
         media_type = "video"
         file_id = message.video.file_id
     else:
-        await update.message.reply_text("This is not a valid media type. Please send a photo or a video.")
+        await send_deletable_message(context, update.effective_chat.id, text="This is not a valid media type. Please send a photo or a video.")
         return AWAIT_POST_MEDIA # Remain in the same state
 
     context.user_data['post_media_type'] = media_type
     context.user_data['post_file_id'] = file_id
 
-    await update.message.reply_text("Media received. Now, please enter the caption for your post.")
+    await send_deletable_message(context, update.effective_chat.id, text="Media received. Now, please enter the caption for your post.")
     return AWAIT_POST_CAPTION
 
 async def receive_post_caption_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handles receiving the caption and shows a preview."""
     caption = update.message.text
     if not caption:
-        await update.message.reply_text("Please provide a caption for your post.")
+        await send_deletable_message(context, update.effective_chat.id, text="Please provide a caption for your post.")
         return AWAIT_POST_CAPTION
 
     context.user_data['post_caption'] = caption
@@ -1627,7 +1660,7 @@ async def receive_post_caption_handler(update: Update, context: ContextTypes.DEF
     file_id = context.user_data['post_file_id']
 
     # Show preview
-    await update.message.reply_text("Here is a preview of your post:")
+    await send_deletable_message(context, update.effective_chat.id, text="Here is a preview of your post:")
 
     keyboard = [
         [
@@ -1644,7 +1677,7 @@ async def receive_post_caption_handler(update: Update, context: ContextTypes.DEF
             await context.bot.send_video(update.effective_chat.id, file_id, caption=caption, reply_markup=reply_markup)
     except Exception as e:
         logger.error(f"Error sending preview for /post command: {e}")
-        await update.message.reply_text("There was an error showing the preview. Please try again.")
+        await send_deletable_message(context, update.effective_chat.id, text="There was an error showing the preview. Please try again.")
         return AWAIT_POST_MEDIA
 
     return CONFIRM_POST
@@ -1664,8 +1697,9 @@ async def post_confirmation_callback(update: Update, context: ContextTypes.DEFAU
         caption = context.user_data.get('post_caption')
 
         if not all([group_id, media_type, file_id, caption]):
-            await context.bot.send_message(
-                chat_id=query.message.chat_id,
+            await send_deletable_message(
+                context,
+                query.message.chat_id,
                 text="An error occurred, some information was lost. Please start over with /post."
             )
             # Clean up potentially partial data
@@ -1680,20 +1714,23 @@ async def post_confirmation_callback(update: Update, context: ContextTypes.DEFAU
                 await context.bot.send_video(group_id, file_id, caption=caption)
 
             # Send a new message as confirmation
-            await context.bot.send_message(
-                chat_id=query.message.chat_id,
+            await send_deletable_message(
+                context,
+                query.message.chat_id,
                 text="✅ Your post has been sent successfully!"
             )
         except Exception as e:
             logger.error(f"Failed to send post to group {group_id}: {e}")
-            await context.bot.send_message(
-                chat_id=query.message.chat_id,
+            await send_deletable_message(
+                context,
+                query.message.chat_id,
                 text=f"An error occurred while trying to post. I might not have the right permissions in the target group.\nError: {e}"
             )
 
     elif query.data == 'post_cancel':
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
+        await send_deletable_message(
+            context,
+            query.message.chat_id,
             text="Post cancelled."
         )
 
@@ -1712,7 +1749,7 @@ COMMAND_MAP = {
     'link': {'is_admin': False}, 'inactive': {'is_admin': True}, 'post': {'is_admin': True},
     'setnickname': {'is_admin': True}, 'removenickname': {'is_admin': True}, 'allban': {'is_admin': True}, 'random': {'is_admin': True},
     'enable': {'is_admin': True}, 'update': {'is_admin': True}, 'risk': {'is_admin': False},
-    'seerisk': {'is_admin': True}, 'purge': {'is_admin': False},
+    'seerisk': {'is_admin': True}, 'purge': {'is_admin': False}, 'timer': {'is_admin': True}, 'notimer': {'is_admin': False},
     'addcondition': {'is_admin': True}, 'listconditions': {'is_admin': True}, 'removecondition': {'is_admin': True},
 }
 
@@ -1763,7 +1800,7 @@ async def command_list_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if is_admin_user:
         msg += '\n\n<b>Commands for admins only:</b>\n' + ('\n'.join(admin_only_cmds) if admin_only_cmds else 'None')
 
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=msg, parse_mode='HTML')
+    await send_deletable_message(context, update.effective_chat.id, text=msg, parse_mode='HTML')
 
 # Persistent storage for disabled commands per group
 DISABLED_COMMANDS_FILE = BASE_DIR / 'disabled_commands.json'
@@ -1796,7 +1833,7 @@ async def disable_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if tag in data:
         del data[tag]
         save_hashtag_data(data)
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Dynamic command /{tag} has been disabled.")
+        await send_deletable_message(context, update.effective_chat.id, text=f"Dynamic command /{tag} has been disabled.")
         return
     # Static command disabling
     if tag in COMMAND_MAP:
@@ -1806,11 +1843,11 @@ async def disable_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if tag not in disabled[group_id]:
             disabled[group_id].append(tag)
             save_disabled_commands(disabled)
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Command /{tag} has been disabled in this group. Admins can re-enable it with /enable {tag}.")
+            await send_deletable_message(context, update.effective_chat.id, text=f"Command /{tag} has been disabled in this group. Admins can re-enable it with /enable {tag}.")
         else:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Command /{tag} is already disabled.")
+            await send_deletable_message(context, update.effective_chat.id, text=f"Command /{tag} is already disabled.")
         return
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"No such dynamic or static command: /{tag}")
+    await send_deletable_message(context, update.effective_chat.id, text=f"No such dynamic or static command: /{tag}")
 
 @command_handler_wrapper(admin_only=True)
 async def enable_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1833,9 +1870,98 @@ async def enable_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not disabled[group_id]:  # Remove group key if list is empty
             del disabled[group_id]
         save_disabled_commands(disabled)
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Command /{command_to_enable} has been enabled in this group.")
+        await send_deletable_message(context, update.effective_chat.id, text=f"Command /{command_to_enable} has been enabled in this group.")
     else:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Command /{command_to_enable} is not currently disabled.")
+        await send_deletable_message(context, update.effective_chat.id, text=f"Command /{command_to_enable} is not currently disabled.")
+
+@command_handler_wrapper(admin_only=True)
+async def timer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Sets a timer for deleting bot messages in the group.
+    Usage: /timer <minutes> (0 to disable)
+    """
+    chat = update.effective_chat
+    if chat.type not in ['group', 'supergroup']:
+        await context.bot.send_message(chat_id=chat.id, text="This command can only be used in a group chat.")
+        return
+
+    if not context.args:
+        settings = load_timer_settings()
+        group_id_str = str(chat.id)
+        current_timer = settings.get(group_id_str, 0)
+        if current_timer > 0:
+            await send_deletable_message(context, chat.id, text=f"The current message deletion timer is set to {current_timer} minutes. Use `/timer <minutes>` to change it, or `/timer 0` to disable.")
+        else:
+            await send_deletable_message(context, chat.id, text="There is no message deletion timer set for this group. Use `/timer <minutes>` to set one.")
+        return
+
+    try:
+        minutes = int(context.args[0])
+    except ValueError:
+        await send_deletable_message(context, chat.id, text="Invalid time. Please provide a number of minutes.")
+        return
+
+    if minutes < 0:
+        await send_deletable_message(context, chat.id, text="Time must be a positive number of minutes.")
+        return
+
+    settings = load_timer_settings()
+    group_id_str = str(chat.id)
+
+    if minutes == 0:
+        if group_id_str in settings:
+            del settings[group_id_str]
+            save_timer_settings(settings)
+            await send_deletable_message(context, chat.id, text="Message deletion timer has been disabled for this group.")
+        else:
+            await send_deletable_message(context, chat.id, text="Message deletion timer is already disabled.")
+    else:
+        settings[group_id_str] = minutes
+        save_timer_settings(settings)
+        await send_deletable_message(context, chat.id, text=f"Bot messages in this group will now be deleted after {minutes} minute(s).")
+
+@command_handler_wrapper(admin_only=False)
+async def notimer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Prevents a specific message from being deleted by a timer.
+    Usage: Reply to one of the bot's messages with /notimer.
+    """
+    message = update.message
+    if not message.reply_to_message:
+        await send_deletable_message(context, message.chat.id, text="Please use this command by replying to the message you want to keep.")
+        return
+
+    # Check if the replied-to message is from this bot
+    if not message.reply_to_message.from_user.id == context.bot.id:
+        await send_deletable_message(context, message.chat.id, text="This command only works on messages sent by me.")
+        return
+
+    replied_message = message.reply_to_message
+    chat_id = replied_message.chat.id
+    message_id = replied_message.message_id
+    job_name = f"delete_{chat_id}_{message_id}"
+
+    # Find and remove the scheduled job
+    jobs = context.job_queue.get_jobs_by_name(job_name)
+    if jobs:
+        for job in jobs:
+            job.schedule_removal()
+        logger.info(f"Removed deletion job {job_name} for message {message_id} in chat {chat_id}.")
+        # Also save to the no_delete_ids file as a fallback
+        no_delete_ids = load_no_delete_ids()
+        no_delete_ids.append({'chat_id': chat_id, 'message_id': message_id})
+        save_no_delete_ids(no_delete_ids)
+        await send_deletable_message(context, chat_id, text="Okay, I will not delete that message.")
+    else:
+        # If no job was found, it might have already been deleted or was never scheduled.
+        # Still, we can add it to the no_delete list just in case the job is about to run.
+        no_delete_ids = load_no_delete_ids()
+        # Avoid adding duplicates
+        if not any(d['message_id'] == message_id for d in no_delete_ids):
+            no_delete_ids.append({'chat_id': chat_id, 'message_id': message_id})
+            save_no_delete_ids(no_delete_ids)
+        await send_deletable_message(context, chat_id, text="This message is now marked to be kept.")
+
 
 @command_handler_wrapper(admin_only=False)
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1916,7 +2042,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             name=f"delete_confirm_{confirmation_msg.message_id}"
         )
     else:
-        await message.reply_text("Could not notify any admins. Please ensure the bot has the correct permissions.")
+        await send_deletable_message(context, message.chat_id, text="Could not notify any admins. Please ensure the bot has the correct permissions.")
 
 
 @command_handler_wrapper(admin_only=False)
@@ -1947,14 +2073,14 @@ async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text=f"Here is your single-use invite link for the group '{chat.title}':\n{invite_link.invite_link}"
                 )
                 # Confirm in the group chat
-                await context.bot.send_message(chat_id=update.effective_chat.id, text="I have sent you a single-use invite link in a private message.")
+                await send_deletable_message(context, update.effective_chat.id, text="I have sent you a single-use invite link in a private message.")
             except Exception as e:
                 logger.error(f"Failed to send private message to admin {user.id}: {e}")
-                await context.bot.send_message(chat_id=update.effective_chat.id, text="I couldn't send you a private message. Please make sure you have started a chat with me privately first.")
+                await send_deletable_message(context, update.effective_chat.id, text="I couldn't send you a private message. Please make sure you have started a chat with me privately first.")
 
         except Exception as e:
             logger.error(f"Failed to create invite link for chat {chat.id}: {e}")
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="I was unable to create an invite link. Please ensure I have the 'Invite Users via Link' permission in this group.")
+            await send_deletable_message(context, update.effective_chat.id, text="I was unable to create an invite link. Please ensure I have the 'Invite Users via Link' permission in this group.")
 
 
 #Start command
@@ -1992,7 +2118,7 @@ If you encounter any bugs or have ideas for new features, please contact my crea
     else:
         # In a group chat, send a prompt and try to message the user privately
         group_start_message = f"Hey {user.mention_html()}! Please message me in private to get started."
-        await context.bot.send_message(chat_id=chat.id, text=group_start_message, parse_mode='HTML')
+        await send_deletable_message(context, chat.id, text=group_start_message, parse_mode='HTML')
         try:
             await context.bot.send_message(
                 chat_id=user.id,
@@ -2050,6 +2176,7 @@ async def help_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - /risk: Take a risk and let fate decide if your media gets posted. (Private chat only)
 - /purge: Deletes all your posted risks, subject to conditions. (Private chat only)
 - /cancel: Cancels an ongoing operation like /risk or /post.
+- /notimer: Reply to a bot message with this command to prevent it from being auto-deleted by a group timer.
         """
     elif topic == 'help_admin':
         if not is_admin(user_id):
@@ -2065,6 +2192,7 @@ async def help_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - /disable &lt;command&gt;: Disables a static command or a dynamic hashtag command in the current group.
 - /enable &lt;command&gt;: Re-enables a disabled static command.
 - /inactive &lt;days&gt;: Sets up automatic kicking for users who are inactive for a specified number of days (e.g., /inactive 30). Use 0 to disable.
+- /timer &lt;minutes&gt;: Sets a timer to automatically delete messages sent by the bot after a certain number of minutes. Use 0 to disable.
 
 <u>Admin & User Identity</u>
 - /update: Refreshes the bot's list of admins for the current group. Run this when admin roles change.
@@ -2114,7 +2242,7 @@ async def beowned_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         disabled = load_disabled_commands()
         if 'beowned' in disabled.get(group_id, []):
             return
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="If you want to be Lion's property, contact @Lionspridechatbot with a head to toe nude picture of yourself and a clear, concise and complete presentation of yourself.")
+    await send_deletable_message(context, update.effective_chat.id, text="If you want to be Lion's property, contact @Lionspridechatbot with a head to toe nude picture of yourself and a clear, concise and complete presentation of yourself.")
 
 #Responses
 def handle_response(text: str) -> str:
@@ -2166,13 +2294,60 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # =============================
 # Timed Message Deletion
 # =============================
+async def send_deletable_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str, **kwargs):
+    """
+    Sends a message and schedules it for deletion if a timer is set for the group.
+    Returns the sent message object.
+    """
+    sent_message = await context.bot.send_message(chat_id=chat_id, text=text, **kwargs)
+
+    if chat_id < 0: # Only apply timers in groups
+        timer_settings = load_timer_settings()
+        group_id_str = str(chat_id)
+        timer_minutes = timer_settings.get(group_id_str)
+
+        if timer_minutes and timer_minutes > 0:
+            message_id = sent_message.message_id
+            job_name = f"delete_{chat_id}_{message_id}"
+            context.job_queue.run_once(
+                delete_message_callback,
+                when=timer_minutes * 60,
+                chat_id=chat_id,
+                data={'message_id': message_id},
+                name=job_name
+            )
+            logger.debug(f"Scheduled message {message_id} in chat {chat_id} for deletion in {timer_minutes} minutes. Job: {job_name}")
+
+    return sent_message
+
 async def delete_message_callback(context: CallbackContext):
-    """Deletes the message specified in the job context."""
+    """Deletes the message specified in the job context if it's not marked for no-deletion."""
+    job_data = context.job.data
+    chat_id = context.job.chat_id
+    message_id = job_data['message_id']
+
+    no_delete_ids = load_no_delete_ids()
+
+    message_to_keep = None
+    for item in no_delete_ids:
+        if item.get('chat_id') == chat_id and item.get('message_id') == message_id:
+            message_to_keep = item
+            break
+
     try:
-        await context.bot.delete_message(chat_id=context.job.chat_id, message_id=context.job.data)
-        logger.debug(f"Deleted scheduled message {context.job.data} in chat {context.job.chat_id}")
+        if message_to_keep:
+            logger.info(f"Deletion cancelled for message {message_id} in chat {chat_id} due to /notimer command.")
+            return
+
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        logger.debug(f"Deleted scheduled message {message_id} in chat {chat_id}")
     except Exception as e:
-        logger.warning(f"Failed to delete scheduled message: {e}")
+        logger.warning(f"Failed to delete scheduled message {message_id} in chat {chat_id}: {e}")
+    finally:
+        # Always try to remove the ID from the list after the job is processed.
+        if message_to_keep:
+            no_delete_ids.remove(message_to_keep)
+            save_no_delete_ids(no_delete_ids)
 
 
 # =============================
@@ -2197,15 +2372,15 @@ async def inactive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if days == 0:
         settings.pop(group_id, None)
         save_inactive_settings(settings)
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="Inactive user kicking is now disabled in this group.")
+        await send_deletable_message(context, update.effective_chat.id, text="Inactive user kicking is now disabled in this group.")
         logger.debug(f"Inactive kicking disabled for group {group_id}")
         return
     if not (1 <= days <= 99):
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="Please provide a number of days between 1 and 99.")
+        await send_deletable_message(context, update.effective_chat.id, text="Please provide a number of days between 1 and 99.")
         return
     settings[group_id] = days
     save_inactive_settings(settings)
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Inactive user kicking is now enabled for this group. Users inactive for {days} days will be kicked.")
+    await send_deletable_message(context, update.effective_chat.id, text=f"Inactive user kicking is now enabled for this group. Users inactive for {days} days will be kicked.")
     logger.debug(f"Inactive kicking enabled for group {group_id} with threshold {days} days")
 
 
@@ -2394,6 +2569,8 @@ if __name__ == '__main__':
     add_command(app, 'enable', enable_command)
     add_command(app, 'update', update_command)
     add_command(app, 'seerisk', seerisk_command)
+    add_command(app, 'timer', timer_command)
+    add_command(app, 'notimer', notimer_command)
     add_command(app, 'risk', risk_command)
     add_command(app, 'post', post_command)
     add_command(app, 'purge', purge_command)
