@@ -240,6 +240,97 @@ async def removenickname_command(update: Update, context: ContextTypes.DEFAULT_T
 
 
 @command_handler_wrapper(admin_only=True)
+async def allban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Bans a user from all groups the bot is in, unless the command is disabled in a group.
+    Can be used with user ID, @username, or by replying to a message.
+    """
+    target_user_id = None
+    target_user_info = "the user"
+
+    if update.message.reply_to_message:
+        target_user_id = update.message.reply_to_message.from_user.id
+        target_user_info = update.message.reply_to_message.from_user.mention_html()
+    elif context.args:
+        arg = context.args[0]
+        if arg.isdigit():
+            target_user_id = int(arg)
+            try:
+                user = await context.bot.get_chat(target_user_id)
+                target_user_info = user.mention_html()
+            except Exception:
+                target_user_info = f"user with ID `{target_user_id}`"
+        elif arg.startswith('@'):
+            username_to_find = arg[1:].lower()
+            risk_data = load_risk_data()
+            found_user_id = None
+            for user_id_str, risks in risk_data.items():
+                if any(r.get('username', '').lower() == username_to_find for r in risks):
+                    found_user_id = user_id_str
+                    break
+            if found_user_id:
+                target_user_id = int(found_user_id)
+                target_user_info = f"user @{username_to_find}"
+            else:
+                await update.message.reply_text(f"Could not find a user ID for {arg}. This can happen if I haven't interacted with them before. Please use their user ID or reply to one of their messages.")
+                return
+        else:
+            await update.message.reply_text("Invalid argument. Please provide a user ID, a @username, or reply to a user's message.")
+            return
+    else:
+        await update.message.reply_text("Usage: /allban <user_id or @username> or reply to a user's message.")
+        return
+
+    if not target_user_id:
+        await update.message.reply_text("Could not identify the target user.")
+        return
+
+    if is_owner(target_user_id):
+        await update.message.reply_text("You cannot ban the owner.")
+        return
+    if target_user_id == update.effective_user.id:
+        await update.message.reply_text("You cannot ban yourself.")
+        return
+
+    admin_data = load_admin_data()
+    all_group_ids = {group for groups in admin_data.values() for group in groups}
+    disabled_cmds = load_disabled_commands()
+
+    successful_bans = []
+    failed_bans = []
+
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Processing all-ban for {target_user_info}. This may take a moment...", parse_mode='HTML')
+
+    for group_id in all_group_ids:
+        if 'allban' in disabled_cmds.get(str(group_id), []):
+            continue
+
+        try:
+            await context.bot.ban_chat_member(chat_id=int(group_id), user_id=target_user_id)
+            try:
+                chat = await context.bot.get_chat(int(group_id))
+                successful_bans.append(html.escape(chat.title))
+            except Exception:
+                successful_bans.append(f"Group ID {group_id}")
+        except Exception as e:
+            try:
+                chat = await context.bot.get_chat(int(group_id))
+                failed_bans.append(f"{html.escape(chat.title)} (Reason: {e})")
+            except Exception:
+                failed_bans.append(f"Group ID {group_id} (Reason: {e})")
+
+    summary_message = f"All-ban executed for {target_user_info}.\n\n"
+    if successful_bans:
+        summary_message += f"✅ <b>Successfully banned from:</b>\n- " + "\n- ".join(successful_bans)
+    if failed_bans:
+        summary_message += f"\n\n❌ <b>Failed to ban from:</b>\n- " + "\n- ".join(failed_bans)
+    if not successful_bans and not failed_bans:
+        summary_message = f"Could not perform the ban. Either the bot is not in any groups or the `/allban` command is disabled in all of them."
+
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=summary_message, parse_mode='HTML')
+
+
+@command_handler_wrapper(admin_only=True)
 async def addcondition_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type not in ['group', 'supergroup']:
@@ -964,6 +1055,10 @@ async def seerisk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             callback_data = f"postrisk_{risk['user_id']}_{risk['risk_id']}"
             keyboard.append([InlineKeyboardButton("Post Now", callback_data=callback_data)])
 
+        # New "Post with Taunt" button for all risked media
+        taunt_callback_data = f"posttaunt_{risk['user_id']}_{risk['risk_id']}"
+        keyboard.append([InlineKeyboardButton("Post with Taunt", callback_data=taunt_callback_data)])
+
         reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
 
         media_type = risk['media_type']
@@ -1043,6 +1138,68 @@ async def post_risk_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception as e:
         logger.error(f"Admin failed to post risk {risk_id} for user {user_id}: {e}")
         await context.bot.send_message(chat_id=query.message.chat_id, text=f"Failed to post media: {e}")
+
+
+async def post_risk_with_taunt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback to post a specific risk to its group with a taunting message."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        # Callback format is "posttaunt_{user_id}_{risk_id}"
+        _, user_id, risk_id = query.data.split('_')
+    except ValueError:
+        await query.edit_message_text("Error: Invalid callback data for taunt.")
+        return
+
+    risk_data = load_risk_data()
+    user_risks = risk_data.get(user_id, [])
+    target_risk = next((r for r in user_risks if r['risk_id'] == risk_id), None)
+
+    if not target_risk:
+        await query.edit_message_text("Error: Could not find this risk. It may have been deleted.")
+        return
+
+    try:
+        user = await context.bot.get_chat(int(user_id))
+        user_mention = user.mention_html()
+    except Exception:
+        user_mention = f"user {user_id}"
+
+    caption = f"I feel mean, so lets see what {user_mention} sent me 😂"
+
+    try:
+        media_type = target_risk['media_type']
+        file_id = target_risk['file_id']
+        group_id = target_risk['group_id']
+
+        posted_message = None
+        if media_type == 'photo':
+            posted_message = await context.bot.send_photo(group_id, file_id, caption=caption, parse_mode='HTML')
+        elif media_type == 'video':
+            posted_message = await context.bot.send_video(group_id, file_id, caption=caption, parse_mode='HTML')
+        elif media_type == 'voice':
+            posted_message = await context.bot.send_voice(group_id, file_id, caption=caption, parse_mode='HTML')
+
+        if posted_message:
+            target_risk['posted_message_id'] = posted_message.message_id
+            save_risk_data(risk_data)
+
+        await context.bot.send_message(chat_id=query.message.chat_id, text="Media has been posted to the group with a taunt.")
+
+        # Update the original message to remove the buttons
+        await query.edit_message_reply_markup(reply_markup=None)
+
+    except Exception as e:
+        error_message = f"An unexpected error occurred: {e}"
+        # These string checks are a bit fragile, but they are the best we can do without specific exception types
+        if "chat not found" in str(e).lower():
+            error_message = "Failed to post: The group does not exist anymore."
+        elif "bot is not a member" in str(e).lower():
+            error_message = "Failed to post: I am no longer in that group."
+
+        logger.error(f"Admin failed to post taunt risk {risk_id} for user {user_id}: {e}")
+        await context.bot.send_message(chat_id=query.message.chat_id, text=error_message)
 
 
 # =============================
@@ -1499,7 +1656,7 @@ COMMAND_MAP = {
     'start': {'is_admin': False}, 'help': {'is_admin': False}, 'beowned': {'is_admin': False},
     'command': {'is_admin': False}, 'disable': {'is_admin': True}, 'admin': {'is_admin': False},
     'link': {'is_admin': True}, 'inactive': {'is_admin': True}, 'post': {'is_admin': True},
-    'setnickname': {'is_admin': True}, 'removenickname': {'is_admin': True},
+    'setnickname': {'is_admin': True}, 'removenickname': {'is_admin': True}, 'allban': {'is_admin': True},
     'enable': {'is_admin': True}, 'update': {'is_admin': True}, 'risk': {'is_admin': False},
     'seerisk': {'is_admin': True}, 'purge': {'is_admin': False},
     'addcondition': {'is_admin': True}, 'listconditions': {'is_admin': True}, 'removecondition': {'is_admin': True},
@@ -1848,6 +2005,7 @@ async def help_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 <b>Administrator Commands</b>
 
 <u>Content & User Management</u>
+- /allban &lt;user&gt;: Bans a user from all groups the bot is in.
 - /post: Create a post with media and a caption to send to a group where you are an admin. (Private chat only)
 - /disable &lt;command&gt;: Disables a static command or a dynamic hashtag command in the current group.
 - /enable &lt;command&gt;: Re-enables a disabled static command.
@@ -2115,6 +2273,7 @@ if __name__ == '__main__':
     add_command(app, 'inactive', inactive_command)
     add_command(app, 'setnickname', setnickname_command)
     add_command(app, 'removenickname', removenickname_command)
+    add_command(app, 'allban', allban_command)
     add_command(app, 'addcondition', addcondition_command)
     add_command(app, 'listconditions', listconditions_command)
     add_command(app, 'removecondition', removecondition_command)
@@ -2127,6 +2286,7 @@ if __name__ == '__main__':
 
     app.add_handler(CallbackQueryHandler(help_menu_handler, pattern=r'^help_'))
     app.add_handler(CallbackQueryHandler(post_risk_callback, pattern=r'^postrisk_'))
+    app.add_handler(CallbackQueryHandler(post_risk_with_taunt_callback, pattern=r'^posttaunt_'))
     app.add_handler(CallbackQueryHandler(purge_verification_callback, pattern=r'^purge_verify_'))
 
     # Fallback handler for dynamic hashtag commands.
