@@ -123,6 +123,17 @@ def command_handler_wrapper(admin_only=False):
 ADMIN_NICKNAMES_FILE = BASE_DIR / 'admin_nicknames.json'
 RISK_DATA_FILE = BASE_DIR / 'risk_data.json'
 CONDITIONS_DATA_FILE = BASE_DIR / 'conditions.json'
+RANDOM_RISK_SETTINGS_FILE = BASE_DIR / 'random_risk_settings.json'
+
+def load_random_risk_settings():
+    if os.path.exists(RANDOM_RISK_SETTINGS_FILE):
+        with open(RANDOM_RISK_SETTINGS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+def save_random_risk_settings(data):
+    with open(RANDOM_RISK_SETTINGS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 def load_risk_data():
     if os.path.exists(RISK_DATA_FILE):
@@ -328,6 +339,49 @@ async def allban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         summary_message = f"Could not perform the ban. Either the bot is not in any groups or the `/allban` command is disabled in all of them."
 
     await context.bot.send_message(chat_id=update.effective_chat.id, text=summary_message, parse_mode='HTML')
+
+
+@command_handler_wrapper(admin_only=True)
+async def random_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Sets the percentage chance for a random risk to be posted automatically every 30 minutes.
+    """
+    chat = update.effective_chat
+    if chat.type not in ['group', 'supergroup']:
+        await context.bot.send_message(chat_id=chat.id, text="This command can only be used in a group chat.")
+        return
+
+    if not context.args:
+        settings = load_random_risk_settings()
+        group_id_str = str(chat.id)
+        current_percentage = settings.get(group_id_str, 0)
+        await context.bot.send_message(chat_id=chat.id, text=f"The current random risk chance is {current_percentage}%. Use `/random <percentage>` to change it.")
+        return
+
+    try:
+        percentage = float(context.args[0])
+    except ValueError:
+        await context.bot.send_message(chat_id=chat.id, text="Invalid percentage. Please provide a number.")
+        return
+
+    if not (0 <= percentage <= 100):
+        await context.bot.send_message(chat_id=chat.id, text="Percentage must be between 0 and 100.")
+        return
+
+    settings = load_random_risk_settings()
+    group_id_str = str(chat.id)
+
+    if percentage == 0:
+        if group_id_str in settings:
+            del settings[group_id_str]
+            save_random_risk_settings(settings)
+            await context.bot.send_message(chat_id=chat.id, text="Automatic random risk posting has been disabled for this group.")
+        else:
+            await context.bot.send_message(chat_id=chat.id, text="Automatic random risk posting is already disabled for this group.")
+    else:
+        settings[group_id_str] = percentage
+        save_random_risk_settings(settings)
+        await context.bot.send_message(chat_id=chat.id, text=f"Automatic random risk chance has been set to {percentage}% for this group. Checks will occur every 30 minutes.")
 
 
 @command_handler_wrapper(admin_only=True)
@@ -1656,7 +1710,7 @@ COMMAND_MAP = {
     'start': {'is_admin': False}, 'help': {'is_admin': False}, 'beowned': {'is_admin': False},
     'command': {'is_admin': False}, 'disable': {'is_admin': True}, 'admin': {'is_admin': False},
     'link': {'is_admin': True}, 'inactive': {'is_admin': True}, 'post': {'is_admin': True},
-    'setnickname': {'is_admin': True}, 'removenickname': {'is_admin': True}, 'allban': {'is_admin': True},
+    'setnickname': {'is_admin': True}, 'removenickname': {'is_admin': True}, 'allban': {'is_admin': True}, 'random': {'is_admin': True},
     'enable': {'is_admin': True}, 'update': {'is_admin': True}, 'risk': {'is_admin': False},
     'seerisk': {'is_admin': True}, 'purge': {'is_admin': False},
     'addcondition': {'is_admin': True}, 'listconditions': {'is_admin': True}, 'removecondition': {'is_admin': True},
@@ -2019,6 +2073,7 @@ async def help_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 <u>Risk & History</u>
 - /seerisk &lt;user_id or @username&gt;: View the risk history of a specific user.
+- /random &lt;percentage&gt;: Sets the percentage chance (0-100) for a random past risk to be posted automatically every 30 minutes. Use 0 to disable.
 
 <u>Purge Conditions (Owner-only)</u>
 - /addcondition &lt;condition&gt;: Adds a condition that users must meet to use /purge.
@@ -2153,6 +2208,62 @@ async def inactive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Inactive user kicking is now enabled for this group. Users inactive for {days} days will be kicked.")
     logger.debug(f"Inactive kicking enabled for group {group_id} with threshold {days} days")
 
+
+async def periodic_random_risk_check(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Periodically checks each configured group and may post a random risk based on the set percentage.
+    """
+    logger.debug("Running periodic random risk check...")
+    settings = load_random_risk_settings()
+
+    for group_id_str, percentage in settings.items():
+        if not (isinstance(percentage, (int, float)) and 0 < percentage <= 100):
+            continue
+
+        # Roll the dice
+        if random.random() * 100 < percentage:
+            logger.info(f"Random risk check passed for group {group_id_str} with {percentage}% chance.")
+            try:
+                risk_data = load_risk_data()
+
+                group_risks = []
+                for user_id, risks in risk_data.items():
+                    for risk in risks:
+                        if str(risk.get('group_id')) == group_id_str:
+                            risk['user_id'] = user_id
+                            group_risks.append(risk)
+
+                if not group_risks:
+                    logger.info(f"Random risk check for group {group_id_str} passed, but no risks were found for this group.")
+                    continue
+
+                target_risk = random.choice(group_risks)
+
+                try:
+                    user = await context.bot.get_chat(int(target_risk['user_id']))
+                    user_mention = user.mention_html()
+                except Exception:
+                    user_mention = f"user {target_risk['user_id']}"
+
+                caption = f"I feel mean, so lets see what {user_mention} sent me 😂"
+
+                media_type = target_risk['media_type']
+                file_id = target_risk['file_id']
+
+                if media_type == 'photo':
+                    await context.bot.send_photo(group_id_str, file_id, caption=caption, parse_mode='HTML')
+                elif media_type == 'video':
+                    await context.bot.send_video(group_id_str, file_id, caption=caption, parse_mode='HTML')
+                elif media_type == 'voice':
+                    await context.bot.send_voice(group_id_str, file_id, caption=caption, parse_mode='HTML')
+
+                logger.info(f"Successfully posted random risk {target_risk.get('risk_id')} in group {group_id_str}.")
+
+            except Exception as e:
+                logger.error(f"Error during periodic random risk posting for group {group_id_str}: {e}")
+        # If the roll fails, we do nothing, ensuring silence.
+
+
 async def check_and_kick_inactive_users(app):
     """
     Checks all groups with inactivity kicking enabled and kicks users who have been inactive too long.
@@ -2214,6 +2325,8 @@ if __name__ == '__main__':
     async def on_startup(app):
         # Schedule the periodic job using the job queue (every hour)
         app.job_queue.run_repeating(periodic_inactive_check_job, interval=3600, first=10)
+        # Schedule the new random risk job (every 30 minutes)
+        app.job_queue.run_repeating(periodic_random_risk_check, interval=1800, first=10)
 
     job_queue = JobQueue()
     app = Application.builder().token(TOKEN).post_init(on_startup).job_queue(job_queue).build()
@@ -2274,6 +2387,7 @@ if __name__ == '__main__':
     add_command(app, 'setnickname', setnickname_command)
     add_command(app, 'removenickname', removenickname_command)
     add_command(app, 'allban', allban_command)
+    add_command(app, 'random', random_command)
     add_command(app, 'addcondition', addcondition_command)
     add_command(app, 'listconditions', listconditions_command)
     add_command(app, 'removecondition', removecondition_command)
