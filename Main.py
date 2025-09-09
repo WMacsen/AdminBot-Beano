@@ -1272,18 +1272,15 @@ async def _do_purge(user_id: int, risks_to_purge: list, context: ContextTypes.DE
     """
     Helper function to perform the actual purge.
     Marks all specified risks as purged and deletes any that were posted.
+    Assumes the risks_to_purge list has already been filtered for disabled groups.
     """
     if not risks_to_purge:
-        # This function might be called with an empty list if only conditional risks existed and they were all handled.
-        # So, no message is needed here.
         return
 
     risk_data = load_risk_data()
     user_risks = risk_data.get(str(user_id), [])
 
-    # Create a set of risk_ids for faster lookup
     risk_ids_to_purge = {r['risk_id'] for r in risks_to_purge}
-
     posted_risks_to_delete = [r for r in risks_to_purge if r.get('posted_message_id')]
 
     success_count = 0
@@ -1343,17 +1340,19 @@ async def purge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     user = update.effective_user
     risk_data = load_risk_data()
+    disabled_commands = load_disabled_commands()
 
-    # Admin purge logic
-    if context.args:
+    # Determine the target user and their info
+    target_user_id = None
+    target_user_info = ""
+    is_admin_purge = bool(context.args)
+
+    if is_admin_purge:
         if not is_admin(user.id):
             await update.message.reply_text("You are not authorized to purge another user's risks.")
             return ConversationHandler.END
 
         target_arg = context.args[0]
-        target_user_id = None
-        target_user_info = ""
-
         if target_arg.startswith('@'):
             target_username = target_arg[1:].lower()
             for user_id_str, risks in risk_data.items():
@@ -1374,67 +1373,67 @@ async def purge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         else:
             await update.message.reply_text("Invalid argument. Please provide a user ID or a @username.")
             return ConversationHandler.END
+    else:
+        target_user_id = str(user.id)
+        target_user_info = "your"
 
-        user_risks = risk_data.get(str(target_user_id), [])
-        risks_to_purge = [r for r in user_risks if not r.get('purged')]
 
-        if not risks_to_purge:
-            await update.message.reply_text(f"No active risks found for {target_user_info} to purge.", parse_mode='HTML')
-            return ConversationHandler.END
+    # --- Universal Filtering Logic ---
+    all_user_risks = risk_data.get(str(target_user_id), [])
+    non_purged_risks = [r for r in all_user_risks if not r.get('purged')]
 
+    if not non_purged_risks:
+        await update.message.reply_text(f"No active risks found for {target_user_info} to purge.", parse_mode='HTML')
+        return ConversationHandler.END
+
+    risks_to_purge = []
+    skipped_groups_info = set()
+    for risk in non_purged_risks:
+        group_id = str(risk['group_id'])
+        if 'purge' in disabled_commands.get(group_id, []):
+            try:
+                chat = await context.bot.get_chat(int(group_id))
+                skipped_groups_info.add(chat.title)
+            except Exception:
+                skipped_groups_info.add(f"Group ID {group_id}")
+        else:
+            risks_to_purge.append(risk)
+
+    if not risks_to_purge:
+        await update.message.reply_text(f"All of {target_user_info} risks are in groups where the /purge command is disabled. No action will be taken.", parse_mode='HTML')
+        return ConversationHandler.END
+
+    # --- Admin Confirmation Flow ---
+    if is_admin_purge:
         context.user_data['purge_target_user_id'] = target_user_id
         context.user_data['risks_to_purge'] = risks_to_purge
 
         confirmation_message = (
             f"🚨 <b>Admin Purge</b> 🚨\n\n"
-            f"You are about to purge all {len(risks_to_purge)} risks for {target_user_info}. "
+            f"You are about to purge {len(risks_to_purge)} risks for {target_user_info}. "
             f"This will delete any posted media and mark all their risked media as purged.\n\n"
             f"This action is irreversible and will bypass any conditions.\n\n"
-            f"Are you sure you want to proceed?"
         )
-        keyboard = [[InlineKeyboardButton("Yes, purge them all.", callback_data='admin_purge_confirm'), InlineKeyboardButton("No, cancel.", callback_data='purge_cancel')]]
+        if skipped_groups_info:
+            confirmation_message += (
+                f"Risks in the following groups will be ignored because /purge is disabled:\n"
+                f"- {', '.join(sorted(list(skipped_groups_info)))}\n\n"
+            )
+        confirmation_message += "Are you sure you want to proceed?"
+        keyboard = [[InlineKeyboardButton("Yes, purge them.", callback_data='admin_purge_confirm'), InlineKeyboardButton("No, cancel.", callback_data='purge_cancel')]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(confirmation_message, reply_markup=reply_markup, parse_mode='HTML')
-
         return CONFIRM_PURGE
 
-    # --- Regular user purge logic ---
-    user_risks = risk_data.get(str(user.id), [])
-    all_user_risks = [r for r in user_risks if not r.get('purged')]
-
-    if not all_user_risks:
-        await update.message.reply_text("You have no risks to purge.")
-        return ConversationHandler.END
-
-    risks_to_delete_posted = [r for r in all_user_risks if r.get('posted_message_id')]
-
-    disabled_commands = load_disabled_commands()
-    enabled_groups_risks = []
-    disabled_groups_info = set()
-    for risk in risks_to_delete_posted:
-        group_id = str(risk['group_id'])
-        if 'purge' in disabled_commands.get(group_id, []):
-            try:
-                chat = await context.bot.get_chat(int(group_id))
-                disabled_groups_info.add(chat.title)
-            except Exception:
-                disabled_groups_info.add(f"Group ID {group_id}")
-        else:
-            enabled_groups_risks.append(risk)
-
-    non_posted_risks = [r for r in all_user_risks if not r.get('posted_message_id')]
-
-    if not enabled_groups_risks and not non_posted_risks:
-        if disabled_groups_info:
-             await update.message.reply_text("The purge feature is currently disabled in all groups where you have posted risks. An admin must enable it with `/enable purge` in the group.")
-        else:
-             await update.message.reply_text("You have no risks to purge.")
-        return ConversationHandler.END
-
+    # --- Regular User Confirmation Flow ---
     conditions_data = load_conditions_data()
     risks_with_conditions = []
     risks_without_conditions = []
-    for risk in enabled_groups_risks:
+
+    posted_risks = [r for r in risks_to_purge if r.get('posted_message_id')]
+    non_posted_risks = [r for r in risks_to_purge if not r.get('posted_message_id')]
+
+    for risk in posted_risks:
         group_id = str(risk['group_id'])
         if isinstance(conditions_data, dict) and group_id in conditions_data and conditions_data[group_id]:
             risks_with_conditions.append(risk)
@@ -1445,29 +1444,24 @@ async def purge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     context.user_data['risks_with_conditions'] = risks_with_conditions
     context.user_data['risks_without_conditions'] = risks_without_conditions
-    context.user_data['purge_target_user_id'] = user.id
-
-    total_posted_count = len(enabled_groups_risks)
-    total_non_posted_count = len(non_posted_risks)
-    total_count = total_posted_count + total_non_posted_count
+    context.user_data['purge_target_user_id'] = target_user_id
 
     confirmation_message = (
         f"🚨 <b>Warning!</b> 🚨\n\n"
-        f"You are about to purge <b>{total_count}</b> of your risks. This action is irreversible.\n"
-        f"This includes <b>{total_posted_count}</b> posted item(s) and <b>{total_non_posted_count}</b> unposted item(s).\n\n"
+        f"You are about to purge <b>{len(risks_to_purge)}</b> of your risks. This action is irreversible.\n"
+        f"This includes <b>{len(posted_risks)}</b> posted item(s) and <b>{len(non_posted_risks)}</b> unposted item(s).\n\n"
     )
 
     if risks_without_conditions:
-        confirmation_message += f"• <b>{len(risks_without_conditions)}</b> risks will be purged immediately (these are unposted items or from groups with no conditions).\n"
+        confirmation_message += f"• <b>{len(risks_without_conditions)}</b> risks will be purged immediately.\n"
     if risks_with_conditions:
-        confirmation_message += f"• <b>{len(risks_with_conditions)}</b> risks from groups with conditions will require admin verification to be deleted.\n"
+        confirmation_message += f"• <b>{len(risks_with_conditions)}</b> posted risks will require admin verification to be deleted.\n"
 
-    if disabled_groups_info:
+    if skipped_groups_info:
         confirmation_message += (
-            f"\nThis will not affect risks posted in the following groups where the command is disabled:\n"
-            f"- {', '.join(sorted(list(disabled_groups_info)))}\n\n"
+            f"\nRisks in the following groups will be ignored because /purge is disabled:\n"
+            f"- {', '.join(sorted(list(skipped_groups_info)))}\n\n"
         )
-
     confirmation_message += "\nAre you sure you want to proceed?"
 
     keyboard = [[InlineKeyboardButton("Yes, I'm sure. Purge them.", callback_data='purge_confirm'), InlineKeyboardButton("No, cancel.", callback_data='purge_cancel')]]
