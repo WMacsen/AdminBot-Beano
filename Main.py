@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 import asyncio
 from functools import wraps
-from telegram import Update, User, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, User, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext, CallbackQueryHandler, ConversationHandler, JobQueue
 from telegram.constants import ChatMemberStatus
 from dotenv import load_dotenv
@@ -2482,7 +2482,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # =============================
 # Timed Message Deletion
 # =============================
-async def schedule_message_deletion(context: ContextTypes.DEFAULT_TYPE, message: User):
+async def schedule_message_deletion(context: ContextTypes.DEFAULT_TYPE, message: Message):
     """
     Schedules a message for deletion if a timer is set for the group.
     """
@@ -2523,8 +2523,12 @@ async def delete_message_callback(context: CallbackContext):
             logger.info(f"Deletion cancelled for message {message_id} in chat {chat_id} due to /notimer command.")
             return
 
-        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-        logger.debug(f"Deleted scheduled message {message_id} in chat {chat_id}")
+        logger.debug(f"Attempting to delete message {message_id} in chat {chat_id}...")
+        success = await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        if success:
+            logger.debug(f"Successfully deleted message {message_id} in chat {chat_id}.")
+        else:
+            logger.warning(f"Call to delete message {message_id} in chat {chat_id} returned {success}, but did not raise an exception.")
     except Exception as e:
         logger.warning(f"Failed to delete scheduled message {message_id} in chat {chat_id}: {e}")
     finally:
