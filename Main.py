@@ -980,7 +980,8 @@ async def receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TY
         'file_id': file_id,
         'risk_failed': should_post_automatically,
         'timestamp': int(time.time()),
-        'posted_message_id': None
+        'posted_message_id': None,
+        'purged': False
     }
 
     if should_post_automatically:
@@ -1090,6 +1091,7 @@ async def beg_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             if posted_message:
                 target_risk['posted_message_id'] = posted_message.message_id
                 save_risk_data(risk_data)
+                await schedule_message_deletion(context, posted_message)
 
             await query.edit_message_text("You begged well enough. Your media has been posted.")
 
@@ -1186,6 +1188,8 @@ async def seerisk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         post_status = "Posted" if risk.get('posted_message_id') else "Not Posted"
 
         status = f"Risk: {risk_outcome}, Status: {post_status}"
+        if risk.get('purged', False):
+            status += " [PURGED]"
 
         caption = (
             f"Risk taken on: {ts}\n"
@@ -1199,9 +1203,10 @@ async def seerisk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             callback_data = f"postrisk_{risk['user_id']}_{risk['risk_id']}"
             keyboard.append([InlineKeyboardButton("Post Now", callback_data=callback_data)])
 
-        # New "Post with Taunt" button for all risked media
-        taunt_callback_data = f"posttaunt_{risk['user_id']}_{risk['risk_id']}"
-        keyboard.append([InlineKeyboardButton("Post with Taunt", callback_data=taunt_callback_data)])
+        # Add "Post with Taunt" button only if the risk is not purged.
+        if not risk.get('purged', False):
+            taunt_callback_data = f"posttaunt_{risk['user_id']}_{risk['risk_id']}"
+            keyboard.append([InlineKeyboardButton("Post with Taunt", callback_data=taunt_callback_data)])
 
         reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
 
@@ -1356,136 +1361,174 @@ async def post_risk_with_taunt_callback(update: Update, context: ContextTypes.DE
 # Purge Command (Big Red Button)
 # =============================
 
-async def _do_purge(user_id: int, user_data: dict, context: ContextTypes.DEFAULT_TYPE):
-    """Helper function to perform the actual deletion of risks."""
-    risks_to_purge = user_data.get('risks_to_purge', [])
-    if not risks_to_purge:
-        sent_message = await context.bot.send_message(chat_id=user_id, text="An internal error occurred: No risks found to purge.")
-        await schedule_message_deletion(context, sent_message)
-        return
-
+async def _delete_and_mark_risks(risks_to_process: list, context: ContextTypes.DEFAULT_TYPE) -> tuple[int, int]:
+    """
+    Deletes posted messages and marks risks as purged in the database.
+    Returns counts of successful and failed deletions.
+    """
     success_count = 0
     failure_count = 0
+
+    if not risks_to_process:
+        return 0, 0
+
+    # It's possible for multiple risks to point to the same user, so we get the user ID from the first one.
+    user_id = risks_to_process[0]['user_id']
     risk_data = load_risk_data()
     user_risks = risk_data.get(str(user_id), [])
 
-    for risk_to_delete in risks_to_purge:
-        group_id = risk_to_delete['group_id']
-        message_id = risk_to_delete['posted_message_id']
-        risk_id = risk_to_delete['risk_id']
-
-        try:
-            await context.bot.delete_message(chat_id=int(group_id), message_id=int(message_id))
-            logger.info(f"Successfully deleted message {message_id} in group {group_id} for user {user_id}.")
-            success_count += 1
-        except Exception as e:
-            logger.error(f"Failed to delete message {message_id} in group {group_id} for user {user_id}: {e}")
+    for risk_to_purge in risks_to_process:
+        # Find the definitive risk object from the loaded data
+        risk_in_db = next((r for r in user_risks if r['risk_id'] == risk_to_purge['risk_id']), None)
+        if not risk_in_db:
             failure_count += 1
-        finally:
-            # Only update the specific risk entry, don't change the outcome history
-            for r in user_risks:
-                if r['risk_id'] == risk_id:
-                    r['posted_message_id'] = None
-                    break
+            continue
+
+        # Delete the message from the group if it was posted
+        if risk_in_db.get('posted_message_id'):
+            try:
+                await context.bot.delete_message(
+                    chat_id=int(risk_in_db['group_id']),
+                    message_id=int(risk_in_db['posted_message_id'])
+                )
+                logger.info(f"Successfully purged message {risk_in_db['posted_message_id']} in group {risk_in_db['group_id']}.")
+                success_count += 1
+            except Exception as e:
+                logger.error(f"Failed to delete message for risk {risk_in_db['risk_id']}: {e}")
+                failure_count += 1
+
+        # Mark as purged and clear the posted_message_id
+        risk_in_db['purged'] = True
+        risk_in_db['posted_message_id'] = None
 
     save_risk_data(risk_data)
-
-    summary_message = f"✅ Deletion complete.\n\nSuccessfully deleted: {success_count} posts.\nFailed to delete: {failure_count} posts."
-    if failure_count > 0:
-        summary_message += "\n\n(Failures can happen if a message was already deleted or if I no longer have permission to delete messages in that group.)"
-
-    sent_message = await context.bot.send_message(chat_id=user_id, text=summary_message)
-    await schedule_message_deletion(context, sent_message)
+    return success_count, failure_count
 
 
 async def purge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Starts the /purge conversation to delete all posted risks."""
-    if update.effective_chat.type != "private":
+    """
+    Starts the /purge conversation for a user on their own risks,
+    or allows an admin to purge another user's risks directly.
+    """
+    user = update.effective_user
+    chat = update.effective_chat
+
+    if chat.type != "private":
         sent_message = await context.bot.send_message(
-            chat_id=update.effective_chat.id,
+            chat_id=chat.id,
             text="The /purge command is only available in private chat."
         )
         await schedule_message_deletion(context, sent_message)
         try:
-            sent_message = await context.bot.send_message(
-                chat_id=update.effective_user.id,
+            await context.bot.send_message(
+                chat_id=user.id,
                 text="Please use the /purge command here to start the process."
             )
-            await schedule_message_deletion(context, sent_message)
         except Exception:
-            pass
+            pass # User might have blocked the bot
         return ConversationHandler.END
 
-    user = update.effective_user
+    # Admin Purge Logic
+    if context.args and is_admin(user.id):
+        target_arg = context.args[0]
+        risk_data = load_risk_data()
+        target_user_id = None
+        target_user_info = f"'{target_arg}'"
+
+        if target_arg.isdigit():
+            target_user_id = target_arg
+        elif target_arg.startswith('@'):
+            username_to_find = target_arg[1:].lower()
+            for user_id_str, risks in risk_data.items():
+                if any(r.get('username', '').lower() == username_to_find for r in risks):
+                    target_user_id = user_id_str
+                    break
+
+        if not target_user_id:
+            await update.message.reply_text(f"Could not find a user with risks matching {target_user_info}.")
+            return ConversationHandler.END
+
+        user_risks = risk_data.get(target_user_id, [])
+        disabled_commands = load_disabled_commands()
+
+        # Admin purge considers all risks, not just those with a posted_message_id
+        risks_to_process = []
+        for risk in user_risks:
+            if 'purge' not in disabled_commands.get(str(risk['group_id']), []):
+                risks_to_process.append(risk)
+
+        if not risks_to_process:
+            await update.message.reply_text(f"User {target_user_id} has no risks that can be purged (they may all be in groups where /purge is disabled).")
+            return ConversationHandler.END
+
+        success_count, failure_count = await _delete_and_mark_risks(risks_to_process, context)
+
+        response_message = (
+            f"Purge complete for user {target_user_id}.\n"
+            f"✅ Successfully deleted {success_count} posts and marked as purged.\n"
+            f"❌ Failed to delete {failure_count} posts (but they were still marked as purged)."
+        )
+        await update.message.reply_text(response_message)
+        return ConversationHandler.END
+
+    # Regular User Purge Logic
     risk_data = load_risk_data()
     user_risks = risk_data.get(str(user.id), [])
 
-    risks_to_delete = [r for r in user_risks if r.get('posted_message_id')]
+    # A user can only purge their own media that has been posted.
+    risks_to_purge = [r for r in user_risks if r.get('posted_message_id') and not r.get('purged', False)]
 
-    if not risks_to_delete:
-        sent_message = await context.bot.send_message(chat_id=update.effective_chat.id, text="You have no posted risks to delete.")
-        await schedule_message_deletion(context, sent_message)
+    if not risks_to_purge:
+        await update.message.reply_text("You have no active, posted risks to purge.")
         return ConversationHandler.END
 
-    # Filter out risks from groups where /purge is disabled
     disabled_commands = load_disabled_commands()
-    enabled_groups_risks = []
+    conditions_data = load_conditions_data()
+
+    risks_with_conditions = []
+    risks_without_conditions = []
     disabled_groups_info = set()
-    for risk in risks_to_delete:
+
+    for risk in risks_to_purge:
         group_id = risk['group_id']
         if 'purge' in disabled_commands.get(str(group_id), []):
             try:
-                chat = await context.bot.get_chat(int(group_id))
-                disabled_groups_info.add(chat.title)
+                chat_info = await context.bot.get_chat(int(group_id))
+                disabled_groups_info.add(chat_info.title)
             except Exception:
                 disabled_groups_info.add(f"Group ID {group_id}")
-        else:
-            enabled_groups_risks.append(risk)
+            continue
 
-    if not enabled_groups_risks:
-        sent_message = await context.bot.send_message(chat_id=update.effective_chat.id, text="The purge feature is currently disabled in all groups where you have posted risks. An admin must enable it with `/enable purge` in the group.")
-        await schedule_message_deletion(context, sent_message)
-        return ConversationHandler.END
-
-    # Categorize risks based on whether their group has conditions
-    conditions_data = load_conditions_data()
-    risks_with_conditions = []
-    risks_without_conditions = []
-    for risk in enabled_groups_risks:
-        group_id = risk['group_id']
-        # Ensure conditions_data is a dict and the group has a non-empty list of conditions
-        if isinstance(conditions_data, dict) and group_id in conditions_data and conditions_data[group_id]:
+        if isinstance(conditions_data, dict) and conditions_data.get(group_id):
             risks_with_conditions.append(risk)
         else:
             risks_without_conditions.append(risk)
 
-    context.user_data['risks_with_conditions'] = risks_with_conditions
-    context.user_data['risks_without_conditions'] = risks_without_conditions
+    total_purgeable = len(risks_with_conditions) + len(risks_without_conditions)
+    if total_purgeable == 0:
+        await update.message.reply_text("The purge feature is currently disabled in all groups where you have posted risks.")
+        return ConversationHandler.END
 
-    # Build the confirmation message
-    total_count = len(enabled_groups_risks)
+    context.user_data['risks_to_purge_with_conditions'] = risks_with_conditions
+    context.user_data['risks_to_purge_without_conditions'] = risks_without_conditions
+
     confirmation_message = (
         f"🚨 <b>Warning!</b> 🚨\n\n"
-        f"You are about to delete <b>{total_count}</b> of your posted risks. This action is irreversible.\n\n"
+        f"You are about to mark <b>{total_purgeable}</b> of your posted risks as 'purged'. "
+        "This means they will no longer be available for /taunt or /random, but will remain visible to admins via /seerisk.\n\n"
     )
-
     if risks_without_conditions:
-        confirmation_message += f"• <b>{len(risks_without_conditions)}</b> risks from groups with no conditions will be deleted immediately.\n"
+        confirmation_message += f"• <b>{len(risks_without_conditions)}</b> risks will be purged immediately.\n"
     if risks_with_conditions:
-        confirmation_message += f"• <b>{len(risks_with_conditions)}</b> risks from groups with conditions will require admin verification.\n"
-
+        confirmation_message += f"• <b>{len(risks_with_conditions)}</b> risks will require admin verification based on group conditions.\n"
     if disabled_groups_info:
-        confirmation_message += (
-            f"\nThis will not affect risks posted in the following groups where the command is disabled:\n"
-            f"- {', '.join(sorted(list(disabled_groups_info)))}\n\n"
-        )
+        confirmation_message += f"\nRisks in these groups cannot be purged as the command is disabled: {', '.join(sorted(list(disabled_groups_info)))}"
 
-    confirmation_message += "\nAre you sure you want to proceed?"
+    confirmation_message += "\n\nAre you sure you want to proceed?"
 
-    keyboard = [[InlineKeyboardButton("Yes, I'm sure. Delete them.", callback_data='purge_confirm'), InlineKeyboardButton("No, cancel.", callback_data='purge_cancel')]]
+    keyboard = [[InlineKeyboardButton("Yes, Purge Them", callback_data='purge_confirm'), InlineKeyboardButton("No, Cancel", callback_data='purge_cancel')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    sent_message = await context.bot.send_message(chat_id=update.effective_chat.id, text=confirmation_message, reply_markup=reply_markup, parse_mode='HTML')
-    await schedule_message_deletion(context, sent_message)
+    await update.message.reply_text(confirmation_message, reply_markup=reply_markup, parse_mode='HTML')
 
     return CONFIRM_PURGE
 
@@ -1509,12 +1552,22 @@ async def send_random_condition(user: User, user_data: dict, context: ContextTyp
 
     # If no conditions are found for any of the relevant groups, purge directly.
     if not applicable_conditions:
-        sent_message = await context.bot.send_message(chat_id=user.id, text="No conditions found for the relevant groups. Proceeding with deletion.")
-        await schedule_message_deletion(context, sent_message)
-        await _do_purge(user.id, user_data, context)
+        await context.bot.send_message(chat_id=user.id, text="No conditions were found for the relevant groups. Proceeding with purge directly...")
+
+        risks_to_purge = user_data.get('risks_to_purge', [])
+        success_count, failure_count = await _delete_and_mark_risks(risks_to_purge, context)
+
+        response_message = (
+            f"Purge process is complete.\n"
+            f"✅ Successfully deleted {success_count} posts.\n"
+            f"❌ Failed to delete {failure_count} posts (they were still marked as purged)."
+        )
+        await context.bot.send_message(chat_id=user.id, text=response_message)
+
         # Clean up user_data
         user_data.pop('risks_to_purge', None)
-        user_data.pop('risks_with_conditions', None)
+        user_data.pop('risks_to_purge_with_conditions', None)
+        user_data.pop('risks_to_purge_without_conditions', None)
         return ConversationHandler.END
 
     condition = random.choice(applicable_conditions)
@@ -1555,40 +1608,44 @@ async def send_random_condition(user: User, user_data: dict, context: ContextTyp
     return AWAIT_CONDITION_VERIFICATION
 
 async def purge_confirmation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the user's confirmation for purging risks, separating conditional and non-conditional purges."""
+    """Handles user's confirmation for purging. Deletes posts and marks risks as purged."""
     query = update.callback_query
     await query.answer()
     user = query.from_user
 
     if query.data == 'purge_cancel':
-        await query.edit_message_text("Operation cancelled. Your risks have not been deleted.")
-        context.user_data.pop('risks_with_conditions', None)
-        context.user_data.pop('risks_without_conditions', None)
+        await query.edit_message_text("Operation cancelled. Your risks have not been changed.")
+        # Clean up context
+        context.user_data.pop('risks_to_purge_with_conditions', None)
+        context.user_data.pop('risks_to_purge_without_conditions', None)
         return ConversationHandler.END
 
     await query.edit_message_text("Confirmed. Processing request...")
 
-    risks_with_conditions = context.user_data.get('risks_with_conditions', [])
-    risks_without_conditions = context.user_data.get('risks_without_conditions', [])
+    risks_with_conditions = context.user_data.get('risks_to_purge_with_conditions', [])
+    risks_without_conditions = context.user_data.get('risks_to_purge_without_conditions', [])
 
-    # Immediately purge risks from groups without conditions
+    # Immediately process risks from groups without conditions
     if risks_without_conditions:
-        temp_user_data = {'risks_to_purge': risks_without_conditions}
-        await _do_purge(user.id, temp_user_data, context)
-        context.user_data.pop('risks_without_conditions')
+        success_count, failure_count = await _delete_and_mark_risks(risks_without_conditions, context)
+        response_message = (
+            f"Purge process for groups without conditions is complete.\n"
+            f"✅ Successfully deleted {success_count} posts.\n"
+            f"❌ Failed to delete {failure_count} posts (they were still marked as purged)."
+        )
+        await context.bot.send_message(chat_id=user.id, text=response_message)
 
     # Now, handle risks from groups that have conditions
     if risks_with_conditions:
-        # Set the remaining risks as the ones to be purged for the next step
-        context.user_data['risks_to_purge'] = risks_with_conditions
+        context.user_data['risks_to_purge'] = risks_with_conditions # For send_random_condition
+        await context.bot.send_message(chat_id=user.id, text="You have risks in groups that require admin verification. Starting that process now...")
         return await send_random_condition(user, context.user_data, context)
     else:
-        # If there were no risks with conditions, we're done.
-        sent_message = await context.bot.send_message(chat_id=user.id, text="All applicable risks have been processed.")
-        await schedule_message_deletion(context, sent_message)
-        context.user_data.pop('risks_with_conditions', None)
+        await context.bot.send_message(chat_id=user.id, text="All applicable risks have been processed.")
+        # Clean up context
+        context.user_data.pop('risks_to_purge_with_conditions', None)
+        context.user_data.pop('risks_to_purge_without_conditions', None)
         return ConversationHandler.END
-
 
 # =============================
 # /post Command Conversation
@@ -1616,20 +1673,27 @@ async def purge_verification_callback(update: Update, context: ContextTypes.DEFA
 
     if decision == 'approve':
         await query.edit_message_text(text=f"{original_message_text}\n\n---\n✅ Approved by {admin_user.mention_html()}", parse_mode='HTML')
-        sent_message = await context.bot.send_message(chat_id=user_id, text="An admin has approved your request. The deletion process will now begin.")
-        await schedule_message_deletion(context, sent_message)
 
-        await _do_purge(user_id, user_data, context)
+        risks_to_purge = user_data.get('risks_to_purge', [])
+
+        success_count, failure_count = await _delete_and_mark_risks(risks_to_purge, context)
+
+        response_message = (
+            f"An admin has approved your request.\n"
+            f"✅ Successfully deleted {success_count} posts and marked as purged.\n"
+            f"❌ Failed to delete {failure_count} posts (but they were still marked as purged)."
+        )
+        await context.bot.send_message(chat_id=user_id, text=response_message)
 
         # Clean up all related data after the final step
         user_data.pop('risks_to_purge', None)
         user_data.pop('current_condition', None)
-        user_data.pop('risks_with_conditions', None)
+        user_data.pop('risks_to_purge_with_conditions', None)
+        user_data.pop('risks_to_purge_without_conditions', None) # Clean this up too for completeness
 
     elif decision == 'deny':
         await query.edit_message_text(text=f"{original_message_text}\n\n---\n❌ Denied by {admin_user.mention_html()}", parse_mode='HTML')
-        sent_message = await context.bot.send_message(chat_id=user_id, text="An admin has denied your request. You will now be given a new condition.")
-        await schedule_message_deletion(context, sent_message)
+        await context.bot.send_message(chat_id=user_id, text="An admin has denied your request. You will now be given a new condition.")
 
         user_object = await context.bot.get_chat(user_id)
         await send_random_condition(user_object, user_data, context)
@@ -2295,7 +2359,7 @@ async def help_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - /beowned: Information on how to be owned.
 - /admin: Request help from admins in a group.
 - /risk: Take a risk and let fate decide if your media gets posted. (Private chat only)
-- /purge: Deletes all your posted risks, subject to conditions. (Private chat only)
+- /purge: Marks your posted risks as 'purged', hiding them from /random and /taunt. (Private chat only)
 - /cancel: Cancels an ongoing operation like /risk or /post.
         """
     elif topic == 'help_admin':
@@ -2321,8 +2385,9 @@ async def help_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - /removenickname &lt;user&gt;: Removes a user's nickname.
 
 <u>Risk & History</u>
-- /seerisk &lt;user_id or @username&gt;: View the risk history of a specific user.
-- /random &lt;percentage&gt;: Sets the percentage chance (0-100) for a random past risk to be posted automatically every 30 minutes. Use 0 to disable.
+- /seerisk &lt;user_id or @username&gt;: View the risk history of a specific user. Purged risks will be marked.
+- /random &lt;percentage&gt;: Sets the percentage chance (0-100) for a random, non-purged risk to be posted automatically every 30 minutes. Use 0 to disable.
+- /purge &lt;user_id or @username&gt;: Mark all of a user's risks as purged across all groups. This ignores group conditions but respects if /purge is disabled in a group.
 
 <u>Purge Conditions (Owner-only)</u>
 - /addcondition &lt;condition&gt;: Adds a condition that users must meet to use /purge.
@@ -2528,7 +2593,7 @@ async def periodic_random_risk_check(context: ContextTypes.DEFAULT_TYPE):
                 group_risks = []
                 for user_id, risks in risk_data.items():
                     for risk in risks:
-                        if str(risk.get('group_id')) == group_id_str:
+                        if str(risk.get('group_id')) == group_id_str and not risk.get('purged', False):
                             risk['user_id'] = user_id
                             group_risks.append(risk)
 
