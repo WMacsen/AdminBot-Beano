@@ -672,6 +672,50 @@ def is_admin(user_id):
     return is_admin_result
 
 
+async def _notify_admins_of_failed_post(context: ContextTypes.DEFAULT_TYPE, group_id: str, failed_user_id: int, reason: str):
+    """Notifies admins of a specific group that an automatic post has failed."""
+    logger.info(f"Notifying admins of group {group_id} about a failed post for user {failed_user_id}.")
+
+    admin_data = load_admin_data()
+    admin_ids = set()
+    for admin_id, groups in admin_data.items():
+        if group_id in groups:
+            admin_ids.add(int(admin_id))
+
+    # Also notify the owner
+    if is_owner(OWNER_ID):
+        admin_ids.add(OWNER_ID)
+
+    if not admin_ids:
+        logger.warning(f"Could not find any admins for group {group_id} to notify about failed post.")
+        return
+
+    try:
+        failed_user = await context.bot.get_chat(failed_user_id)
+        failed_user_mention = failed_user.mention_html()
+    except Exception:
+        failed_user_mention = f"user with ID <code>{failed_user_id}</code>"
+
+    try:
+        group_chat = await context.bot.get_chat(int(group_id))
+        group_name = group_chat.title
+    except Exception:
+        group_name = f"group with ID <code>{group_id}</code>"
+
+    notification_text = (
+        f"🔔 <b>Automatic Post Failure</b> 🔔\n\n"
+        f"An automatic risk post for {failed_user_mention} in <b>{group_name}</b> failed.\n\n"
+        f"<b>Reason:</b> {html.escape(reason)}\n\n"
+        f"You may need to manually post their risk via <code>/seerisk</code> or check my permissions in the group."
+    )
+
+    for admin_id in admin_ids:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=notification_text, parse_mode='HTML')
+        except Exception as e:
+            logger.warning(f"Failed to send post failure notification to admin {admin_id}: {e}")
+
+
 # =============================
 # Hashtag Data Management
 # =============================
@@ -1011,6 +1055,7 @@ async def receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         except Exception as e:
             logger.error(f"Failed to automatically post risk {risk_id} for user {user.id}: {e}")
+            await _notify_admins_of_failed_post(context, group_id, user.id, str(e))
             sent_message = await context.bot.send_message(chat_id=update.effective_chat.id, text="You were unlucky... but I couldn't post your media. Perhaps my permissions in the group have changed.")
             await schedule_message_deletion(context, sent_message)
 
@@ -1204,7 +1249,7 @@ async def seerisk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         keyboard = []
         # Allow posting only if the risk was failed and it's not already posted.
-        if risk_failed_flag and not risk.get('posted_message_id'):
+        if risk_failed_flag and not risk.get('posted_message_id') and not risk.get('purged', False):
             callback_data = f"postrisk_{risk['user_id']}_{risk['risk_id']}"
             keyboard.append([InlineKeyboardButton("Post Now", callback_data=callback_data)])
 
