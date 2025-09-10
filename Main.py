@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 import asyncio
 from functools import wraps
-from telegram import Update, User, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, User, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext, CallbackQueryHandler, ConversationHandler, JobQueue
 from telegram.constants import ChatMemberStatus
 from dotenv import load_dotenv
@@ -2560,7 +2560,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # =============================
 # Timed Message Deletion
 # =============================
-async def schedule_message_deletion(context: ContextTypes.DEFAULT_TYPE, message: User):
+async def schedule_message_deletion(context: ContextTypes.DEFAULT_TYPE, message: Message):
     """
     Schedules a message for deletion if a timer is set for the group.
     """
@@ -2691,13 +2691,17 @@ async def periodic_random_risk_check(context: ContextTypes.DEFAULT_TYPE):
 
                 media_type = target_risk['media_type']
                 file_id = target_risk['file_id']
+                sent_message = None
 
                 if media_type == 'photo':
-                    await context.bot.send_photo(group_id_str, file_id, caption=caption, parse_mode='HTML')
+                    sent_message = await context.bot.send_photo(group_id_str, file_id, caption=caption, parse_mode='HTML')
                 elif media_type == 'video':
-                    await context.bot.send_video(group_id_str, file_id, caption=caption, parse_mode='HTML')
+                    sent_message = await context.bot.send_video(group_id_str, file_id, caption=caption, parse_mode='HTML')
                 elif media_type == 'voice':
-                    await context.bot.send_voice(group_id_str, file_id, caption=caption, parse_mode='HTML')
+                    sent_message = await context.bot.send_voice(group_id_str, file_id, caption=caption, parse_mode='HTML')
+
+                if sent_message:
+                    await schedule_message_deletion(context, sent_message)
 
                 logger.info(f"Successfully posted random risk {target_risk.get('risk_id')} in group {group_id_str}.")
 
