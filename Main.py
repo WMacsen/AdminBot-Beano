@@ -1131,9 +1131,14 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # =============================
 # SeeRisk Command
 # =============================
-@command_handler_wrapper(admin_only=True)
+@command_handler_wrapper()
 async def seerisk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin command to see all risks taken by a specific user."""
+    if not is_admin(update.effective_user.id):
+        sent_message = await context.bot.send_message(chat_id=update.effective_chat.id, text="You are not authorized to use this command.")
+        await schedule_message_deletion(context, sent_message)
+        return
+
     if not context.args:
         sent_message = await context.bot.send_message(chat_id=update.effective_chat.id, text="Usage: /seerisk <user_id or @username>")
         await schedule_message_deletion(context, sent_message)
@@ -1214,16 +1219,31 @@ async def seerisk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_id = risk['file_id']
 
         try:
+            sent_message = None
             if media_type == 'photo':
                 sent_message = await context.bot.send_photo(update.effective_chat.id, file_id, caption=caption, reply_markup=reply_markup)
             elif media_type == 'video':
                 sent_message = await context.bot.send_video(update.effective_chat.id, file_id, caption=caption, reply_markup=reply_markup)
             elif media_type == 'voice':
                 sent_message = await context.bot.send_voice(update.effective_chat.id, file_id, caption=caption, reply_markup=reply_markup)
-            await schedule_message_deletion(context, sent_message)
+
+            # If a message was sent and it had buttons, record it for later editing.
+            if sent_message and reply_markup:
+                if 'seerisk_messages' not in risk:
+                    risk['seerisk_messages'] = []
+                risk['seerisk_messages'].append({
+                    'chat_id': sent_message.chat.id,
+                    'message_id': sent_message.message_id
+                })
+
+            if sent_message:
+                await schedule_message_deletion(context, sent_message)
+
         except Exception as e:
-            sent_message = await context.bot.send_message(update.effective_chat.id, text=f"Could not retrieve media for a risk from {ts}. It might be too old or deleted. Error: {e}")
-            await schedule_message_deletion(context, sent_message)
+            error_message = await context.bot.send_message(update.effective_chat.id, text=f"Could not retrieve media for a risk from {ts}. It might be too old or deleted. Error: {e}")
+            await schedule_message_deletion(context, error_message)
+
+    save_risk_data(risk_data)
 
 
 async def post_risk_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1384,6 +1404,18 @@ async def _delete_and_mark_risks(risks_to_process: list, context: ContextTypes.D
             failure_count += 1
             continue
 
+        # Remove taunt buttons from any admin's /seerisk view
+        if risk_in_db.get('seerisk_messages'):
+            for msg_info in risk_in_db['seerisk_messages']:
+                try:
+                    await context.bot.edit_message_reply_markup(
+                        chat_id=msg_info['chat_id'],
+                        message_id=msg_info['message_id'],
+                        reply_markup=None
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to remove taunt button from seerisk message {msg_info['message_id']}: {e}")
+
         # Delete the message from the group if it was posted
         if risk_in_db.get('posted_message_id'):
             try:
@@ -1397,9 +1429,10 @@ async def _delete_and_mark_risks(risks_to_process: list, context: ContextTypes.D
                 logger.error(f"Failed to delete message for risk {risk_in_db['risk_id']}: {e}")
                 failure_count += 1
 
-        # Mark as purged and clear the posted_message_id
+        # Mark as purged, clear the posted_message_id, and clear the seerisk_messages
         risk_in_db['purged'] = True
         risk_in_db['posted_message_id'] = None
+        risk_in_db.pop('seerisk_messages', None)
 
     save_risk_data(risk_data)
     return success_count, failure_count
