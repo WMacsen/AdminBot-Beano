@@ -163,13 +163,30 @@ def save_random_risk_settings(data):
 
 def load_risk_data():
     if os.path.exists(RISK_DATA_FILE):
-        with open(RISK_DATA_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        try:
+            with open(RISK_DATA_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            # Corrupted file detected
+            corrupted_file_path = RISK_DATA_FILE.with_suffix('.json.corrupted')
+            try:
+                os.rename(RISK_DATA_FILE, corrupted_file_path)
+                logger.error(f"Risk data file was corrupted. Moved to {corrupted_file_path}. Starting with empty risk data.")
+            except OSError as e:
+                logger.error(f"Could not rename corrupted risk data file: {e}")
+            return {}
     return {}
 
 def save_risk_data(data):
-    with open(RISK_DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    # Create a temporary file path
+    temp_file_path = RISK_DATA_FILE.with_suffix('.json.tmp')
+    try:
+        with open(temp_file_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        # Atomically replace the original file with the temporary file
+        os.replace(temp_file_path, RISK_DATA_FILE)
+    except (OSError, IOError) as e:
+        logger.error(f"Could not save risk data to {RISK_DATA_FILE}: {e}")
 
 def load_conditions_data():
     if os.path.exists(CONDITIONS_DATA_FILE):
