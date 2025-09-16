@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 import asyncio
 from functools import wraps
-from telegram import Update, User, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from telegram import Update, User, InlineKeyboardButton, InlineKeyboardMarkup, Message, InputMediaPhoto, InputMediaVideo
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext, CallbackQueryHandler, ConversationHandler, JobQueue
 from telegram.constants import ChatMemberStatus
 from dotenv import load_dotenv
@@ -1188,75 +1188,88 @@ async def _ask_for_save_consent(update: Update, context: ContextTypes.DEFAULT_TY
     )
     return AWAIT_SAVE_CONSENT
 
+async def _post_risk_batch(risks_to_post: list, caption: str, group_id: str, context: ContextTypes.DEFAULT_TYPE) -> list[int]:
+    """Helper function to post a batch of risks, grouping media where possible."""
+    posted_message_ids = []
+    photos_and_videos = [r for r in risks_to_post if r['media_type'] in ['photo', 'video']]
+    other_media = [r for r in risks_to_post if r['media_type'] not in ['photo', 'video']]
+
+    try:
+        # Post photos and videos as a media group
+        if photos_and_videos:
+            input_media_group = []
+            for i, risk in enumerate(photos_and_videos):
+                item_caption = caption if i == 0 else ''
+                if risk['media_type'] == 'photo':
+                    input_media_group.append(InputMediaPhoto(media=risk['file_id'], caption=item_caption, parse_mode='HTML'))
+                elif risk['media_type'] == 'video':
+                    input_media_group.append(InputMediaVideo(media=risk['file_id'], caption=item_caption, parse_mode='HTML'))
+
+            if input_media_group:
+                posted_messages = await context.bot.send_media_group(chat_id=group_id, media=input_media_group)
+                posted_message_ids.extend([msg.message_id for msg in posted_messages])
+
+        # Post other media types individually
+        for risk in other_media:
+            posted_message = None
+            if risk['media_type'] == 'voice':
+                posted_message = await context.bot.send_voice(group_id, risk['file_id'], caption=caption, parse_mode='HTML')
+
+            if posted_message:
+                posted_message_ids.append(posted_message.message_id)
+
+    except Exception as e:
+        logger.error(f"Failed to post media batch to group {group_id}: {e}")
+        await _notify_admins_of_failed_post(context, group_id, risks_to_post[0]['user_id'], str(e))
+
+    return posted_message_ids
+
 async def save_consent_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handles the consent decision and proceeds with the risk logic for the batch."""
     query = update.callback_query
     await query.answer()
 
-    decision = query.data
-    context.user_data['allow_random'] = (decision == 'risk_save_consent_yes')
+    context.user_data['allow_random'] = (query.data == 'risk_save_consent_yes')
 
     if context.user_data['allow_random']:
-        await query.edit_message_text("You got it. Your media will be saved for future fun. Now, let's see what fate has in store for you...")
+        await query.edit_message_text("You got it. Your media will be saved. Now, let's see what fate has in store...")
     else:
-        await query.edit_message_text("Your secret is safe with me. This risk will be a one-time thing. Now, let's see what fate has in store for you...")
+        await query.edit_message_text("Your secret is safe. This is a one-time event. Now, let's see what fate has in store...")
 
-    user = update.effective_user
-    group_id = context.user_data.get('risk_group_id')
-    media_list = context.user_data.get('risk_media', [])
-    allow_random = context.user_data.get('allow_random')
+    user, group_id = update.effective_user, context.user_data.get('risk_group_id')
+    media_list, allow_random = context.user_data.get('risk_media', []), context.user_data.get('allow_random')
 
+    should_post = random.choice([True, False])
     risk_data = load_risk_data()
-    unlucky_risks, lucky_risks = [], []
+    new_risks_batch = []
 
-    for media_item in media_list:
-        should_post = random.choice([True, False])
-        new_risk = {
+    for item in media_list:
+        new_risks_batch.append({
             'risk_id': uuid.uuid4().hex, 'user_id': user.id, 'username': user.username,
-            'group_id': group_id, 'media_type': media_item['type'], 'file_id': media_item['id'],
+            'group_id': group_id, 'media_type': item['type'], 'file_id': item['id'],
             'risk_failed': should_post, 'timestamp': int(time.time()),
-            'posted_message_id': None, 'purged': not allow_random
-        }
-        risk_data.setdefault(str(user.id), []).append(new_risk)
-        (unlucky_risks if should_post else lucky_risks).append(new_risk)
+            'posted_message_ids': [], 'purged': not allow_random
+        })
 
-    posted_count = 0
-    if unlucky_risks:
-        user_mention = user.mention_html()
-        caption = f"{user_mention} decided to risk fate and failed miserably! 😈"
-        for risk in unlucky_risks:
-            try:
-                posted_message = None
-                if risk['media_type'] == 'photo':
-                    posted_message = await context.bot.send_photo(group_id, risk['file_id'], caption=caption, parse_mode='HTML')
-                elif risk['media_type'] == 'video':
-                    posted_message = await context.bot.send_video(group_id, risk['file_id'], caption=caption, parse_mode='HTML')
-                elif risk['media_type'] == 'voice':
-                    posted_message = await context.bot.send_voice(group_id, risk['file_id'], caption=caption, parse_mode='HTML')
+    posted_ids = []
+    if should_post:
+        caption = f"{user.mention_html()} decided to risk fate and failed miserably! 😈"
+        posted_ids = await _post_risk_batch(new_risks_batch, caption, group_id, context)
 
-                if posted_message:
-                    risk['posted_message_id'] = posted_message.message_id
-                    posted_count += 1
-            except Exception as e:
-                logger.error(f"Failed to post an unlucky risk {risk['risk_id']}: {e}")
-                await _notify_admins_of_failed_post(context, group_id, user.id, str(e))
+    for risk in new_risks_batch:
+        risk['posted_message_ids'] = posted_ids
+        risk['posted_message_id'] = posted_ids[0] if posted_ids else None
 
+    risk_data.setdefault(str(user.id), []).extend(new_risks_batch)
     save_risk_data(risk_data)
 
-    summary_parts = []
-    if unlucky_risks:
-        summary_parts.append(f"You were unlucky with {len(unlucky_risks)} item(s)! {posted_count} of them have been posted.")
-    if lucky_risks:
-        summary_parts.append(f"You were lucky with {len(lucky_risks)} item(s). They have not been posted.")
-        context.user_data['risk_ids_to_beg_for'] = [r['risk_id'] for r in lucky_risks]
-
+    if not should_post:
+        context.user_data['risk_ids_to_beg_for'] = [r['risk_id'] for r in new_risks_batch]
         keyboard = [[InlineKeyboardButton("Please post them anyway Sir 🙏", callback_data='beg_post_yes')], [InlineKeyboardButton("Thanks Sir", callback_data='beg_post_no')]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await context.bot.send_message(chat_id=user.id, text="\n".join(summary_parts) + "\n\nUnless you want to beg me to post the lucky ones anyway? 😉", reply_markup=reply_markup)
+        await context.bot.send_message(user.id, "You were lucky! Your media will not be posted... unless you want to beg? 😉", reply_markup=InlineKeyboardMarkup(keyboard))
         return AWAIT_BEGGING
 
-    await context.bot.send_message(chat_id=user.id, text="\n".join(summary_parts))
+    await context.bot.send_message(user.id, f"You were unlucky! Your batch of {len(media_list)} items has been posted.")
     for key in ['risk_group_id', 'risk_media', 'allow_random']:
         context.user_data.pop(key, None)
     return ConversationHandler.END
@@ -1265,45 +1278,33 @@ async def beg_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     """Handles the user's decision to beg for lucky risks to be posted."""
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
-    decision = query.data
-
     await query.edit_message_reply_markup(reply_markup=None)
 
-    if decision == 'beg_post_no':
+    if query.data == 'beg_post_no':
         await query.edit_message_text("As you wish. Your secrets are safe... for now.")
-    elif decision == 'beg_post_yes':
-        risk_ids_to_post = context.user_data.get('risk_ids_to_beg_for', [])
-        if not risk_ids_to_post:
+    elif query.data == 'beg_post_yes':
+        risk_ids = context.user_data.get('risk_ids_to_beg_for', [])
+        if not risk_ids:
             await query.edit_message_text("I seem to have lost the details of your risk. Please start over.")
             return ConversationHandler.END
 
         await query.edit_message_text("You begged well enough. Posting your media now...")
         risk_data = load_risk_data()
-        user_risks = risk_data.get(str(user_id), [])
+        user_risks = risk_data.get(str(query.from_user.id), [])
 
-        user_mention = query.from_user.mention_html()
-        caption = f"{user_mention} BEGGED me to be posted without mercy 😈"
+        risks_to_post = [r for r in user_risks if r['risk_id'] in risk_ids]
+        if not risks_to_post:
+            return ConversationHandler.END
 
-        for risk_id in risk_ids_to_post:
-            target_risk = next((r for r in user_risks if r['risk_id'] == risk_id), None)
-            if not target_risk: continue
+        group_id = risks_to_post[0]['group_id']
+        caption = f"{query.from_user.mention_html()} BEGGED me to be posted without mercy 😈"
+        posted_ids = await _post_risk_batch(risks_to_post, caption, group_id, context)
 
-            try:
-                posted_message = None
-                if target_risk['media_type'] == 'photo':
-                    posted_message = await context.bot.send_photo(target_risk['group_id'], target_risk['file_id'], caption=caption, parse_mode='HTML')
-                elif target_risk['media_type'] == 'video':
-                    posted_message = await context.bot.send_video(target_risk['group_id'], target_risk['file_id'], caption=caption, parse_mode='HTML')
-                elif target_risk['media_type'] == 'voice':
-                    posted_message = await context.bot.send_voice(target_risk['group_id'], target_risk['file_id'], caption=caption, parse_mode='HTML')
-
-                if posted_message:
-                    target_risk['posted_message_id'] = posted_message.message_id
-            except Exception as e:
-                logger.error(f"Failed to post begged risk {risk_id} for user {user_id}: {e}")
-
-        save_risk_data(risk_data)
+        if posted_ids:
+            for risk in risks_to_post:
+                risk['posted_message_ids'] = posted_ids
+                risk['posted_message_id'] = posted_ids[0]
+            save_risk_data(risk_data)
 
     for key in ['risk_group_id', 'risk_media', 'allow_random', 'risk_ids_to_beg_for']:
         context.user_data.pop(key, None)
@@ -1667,47 +1668,41 @@ async def _delete_and_mark_risks(risks_to_process: list, context: ContextTypes.D
     if not risks_to_process:
         return 0, 0
 
-    # It's possible for multiple risks to point to the same user, so we get the user ID from the first one.
     user_id = risks_to_process[0]['user_id']
     risk_data = load_risk_data()
     user_risks = risk_data.get(str(user_id), [])
 
+    # Use a set to avoid deleting the same message multiple times if risks share message IDs
+    messages_to_delete = set()
+
     for risk_to_purge in risks_to_process:
-        # Find the definitive risk object from the loaded data
         risk_in_db = next((r for r in user_risks if r['risk_id'] == risk_to_purge['risk_id']), None)
         if not risk_in_db:
-            failure_count += 1
             continue
 
-        # Remove taunt buttons from any admin's /seerisk view
-        if risk_in_db.get('seerisk_messages'):
-            for msg_info in risk_in_db['seerisk_messages']:
-                try:
-                    await context.bot.edit_message_reply_markup(
-                        chat_id=msg_info['chat_id'],
-                        message_id=msg_info['message_id'],
-                        reply_markup=None
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to remove taunt button from seerisk message {msg_info['message_id']}: {e}")
+        # New: Handle list of message IDs
+        if 'posted_message_ids' in risk_in_db and risk_in_db['posted_message_ids']:
+            for msg_id in risk_in_db['posted_message_ids']:
+                messages_to_delete.add((int(risk_in_db['group_id']), int(msg_id)))
+        # Old: Handle single message ID for backward compatibility
+        elif 'posted_message_id' in risk_in_db and risk_in_db['posted_message_id']:
+            messages_to_delete.add((int(risk_in_db['group_id']), int(risk_in_db['posted_message_id'])))
 
-        # Delete the message from the group if it was posted
-        if risk_in_db.get('posted_message_id'):
-            try:
-                await context.bot.delete_message(
-                    chat_id=int(risk_in_db['group_id']),
-                    message_id=int(risk_in_db['posted_message_id'])
-                )
-                logger.info(f"Successfully purged message {risk_in_db['posted_message_id']} in group {risk_in_db['group_id']}.")
-                success_count += 1
-            except Exception as e:
-                logger.error(f"Failed to delete message for risk {risk_in_db['risk_id']}: {e}")
-                failure_count += 1
-
-        # Mark as purged, clear the posted_message_id, and clear the seerisk_messages
+        # Mark as purged and clear data
         risk_in_db['purged'] = True
         risk_in_db['posted_message_id'] = None
+        risk_in_db['posted_message_ids'] = []
         risk_in_db.pop('seerisk_messages', None)
+
+    # Delete all unique messages
+    for group_id, message_id in messages_to_delete:
+        try:
+            await context.bot.delete_message(chat_id=group_id, message_id=message_id)
+            logger.info(f"Successfully purged message {message_id} in group {group_id}.")
+            success_count += 1
+        except Exception as e:
+            logger.error(f"Failed to delete message {message_id} in group {group_id}: {e}")
+            failure_count += 1
 
     save_risk_data(risk_data)
     return success_count, failure_count
