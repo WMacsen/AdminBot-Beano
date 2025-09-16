@@ -984,6 +984,13 @@ async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_
     Handles dynamic hashtag commands (e.g. /mytag) to retrieve saved messages/media.
     This acts as a fallback for any command not in COMMAND_MAP. It ignores unknown commands.
     """
+    # Manually delete the command message in groups, as this handler doesn't use the main wrapper
+    if update.message and update.effective_chat.type in ['group', 'supergroup']:
+        try:
+            await context.bot.delete_message(update.effective_chat.id, update.message.message_id)
+        except Exception as e:
+            logger.warning(f"Failed to delete dynamic command message {update.message.message_id} in chat {update.effective_chat.id}: {e}")
+
     if update.effective_chat.type == "private":
         return
 
