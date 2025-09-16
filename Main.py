@@ -104,40 +104,35 @@ def command_handler_wrapper(admin_only=False):
             chat = update.effective_chat
             message_id = update.message.message_id
 
-            # Defer message deletion to the end
-            should_delete = True
+            # Immediately delete the command message in groups
+            if chat.type in ['group', 'supergroup']:
+                try:
+                    await context.bot.delete_message(chat.id, message_id)
+                except Exception:
+                    logger.warning(f"Failed to delete command message {message_id} in chat {chat.id}. Bot may not have delete permissions.")
 
-            try:
-                # Check if the command is disabled
-                if chat.type in ['group', 'supergroup']:
-                    command_name = func.__name__.replace('_command', '')
-                    disabled_cmds = set(load_disabled_commands().get(str(chat.id), []))
-                    if command_name in disabled_cmds:
-                        logger.info(f"Command '{command_name}' is disabled in group {chat.id}. Aborting.")
-                        return # Silently abort if command is disabled
+            # Check if the command is disabled
+            if chat.type in ['group', 'supergroup']:
+                command_name = func.__name__.replace('_command', '')
+                disabled_cmds = set(load_disabled_commands().get(str(chat.id), []))
+                if command_name in disabled_cmds:
+                    logger.info(f"Command '{command_name}' is disabled in group {chat.id}. Aborting.")
+                    return # Silently abort if command is disabled
 
-                if admin_only and chat.type in ['group', 'supergroup']:
-                    member = await context.bot.get_chat_member(chat.id, user.id)
-                    if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-                        sent_message = await context.bot.send_message(
-                            chat_id=chat.id,
-                            text=f"Warning: {user.mention_html()}, you are not authorized to use this command.",
-                            parse_mode='HTML'
-                        )
-                        await schedule_message_deletion(context, sent_message)
-                        # Still delete their command attempt
-                        return
+            if admin_only and chat.type in ['group', 'supergroup']:
+                member = await context.bot.get_chat_member(chat.id, user.id)
+                if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+                    sent_message = await context.bot.send_message(
+                        chat_id=chat.id,
+                        text=f"Warning: {user.mention_html()}, you are not authorized to use this command.",
+                        parse_mode='HTML'
+                    )
+                    await schedule_message_deletion(context, sent_message)
+                    # The original command was already deleted, so just return.
+                    return
 
-                # Execute the actual command function
-                await func(update, context, *args, **kwargs)
-
-            finally:
-                # Delete the command message
-                if should_delete and chat.type in ['group', 'supergroup']:
-                    try:
-                        await context.bot.delete_message(chat.id, message_id)
-                    except Exception:
-                        logger.warning(f"Failed to delete command message {message_id} in chat {chat.id}. Bot may not have delete permissions.")
+            # Execute the actual command function
+            await func(update, context, *args, **kwargs)
 
         return wrapper
     return decorator
@@ -402,54 +397,183 @@ async def allban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await schedule_message_deletion(context, sent_message)
 
 
-@command_handler_wrapper(admin_only=True)
-async def random_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# States for Random Conversation
+AWAIT_ADMIN_CHOICE, AWAIT_TARGET_USER, AWAIT_RANDOM_MEDIA = range(10, 13)
+
+async def random_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    Sets the percentage chance for a random risk to be posted automatically every 30 minutes.
+    Dual-function command.
+    - In groups, admins set the random post percentage.
+    - In private, starts a conversation for users to submit media to the random pool.
     """
     chat = update.effective_chat
-    if chat.type not in ['group', 'supergroup']:
-        sent_message = await context.bot.send_message(chat_id=chat.id, text="This command can only be used in a group chat.")
-        await schedule_message_deletion(context, sent_message)
-        return
+    user = update.effective_user
 
-    if not context.args:
-        settings = load_random_risk_settings()
-        group_id_str = str(chat.id)
-        current_percentage = settings.get(group_id_str, 0)
-        sent_message = await context.bot.send_message(chat_id=chat.id, text=f"The current random risk chance is {current_percentage}%. Use `/random <percentage>` to change it.")
-        await schedule_message_deletion(context, sent_message)
-        return
+    # Group functionality: Set percentage
+    if chat.type in ['group', 'supergroup']:
+        member = await context.bot.get_chat_member(chat.id, user.id)
+        if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+            await context.bot.send_message(chat.id, "This command is for admins in a group. To add media to the random pool, please use /random in a private chat with me.")
+            return ConversationHandler.END
 
-    try:
-        percentage = float(context.args[0])
-    except ValueError:
-        sent_message = await context.bot.send_message(chat_id=chat.id, text="Invalid percentage. Please provide a number.")
-        await schedule_message_deletion(context, sent_message)
-        return
+        if not context.args:
+            settings = load_random_risk_settings()
+            current_percentage = settings.get(str(chat.id), 0)
+            await context.bot.send_message(chat.id, f"The current random risk chance is {current_percentage}%. Use `/random <percentage>` to change it.")
+            return ConversationHandler.END
 
-    if not (0 <= percentage <= 100):
-        sent_message = await context.bot.send_message(chat_id=chat.id, text="Percentage must be between 0 and 100.")
-        await schedule_message_deletion(context, sent_message)
-        return
+        try:
+            percentage = float(context.args[0])
+            if not (0 <= percentage <= 100):
+                await context.bot.send_message(chat.id, "Percentage must be between 0 and 100.")
+                return ConversationHandler.END
 
-    settings = load_random_risk_settings()
-    group_id_str = str(chat.id)
-
-    if percentage == 0:
-        if group_id_str in settings:
-            del settings[group_id_str]
+            settings = load_random_risk_settings()
+            if percentage == 0:
+                settings.pop(str(chat.id), None)
+                await context.bot.send_message(chat.id, "Automatic random risk posting has been disabled for this group.")
+            else:
+                settings[str(chat.id)] = percentage
+                await context.bot.send_message(chat.id, f"Automatic random risk chance set to {percentage}%.")
             save_random_risk_settings(settings)
-            sent_message = await context.bot.send_message(chat_id=chat.id, text="Automatic random risk posting has been disabled for this group.")
-            await schedule_message_deletion(context, sent_message)
+
+        except ValueError:
+            await context.bot.send_message(chat.id, "Invalid percentage. Please provide a number.")
+
+        return ConversationHandler.END
+
+    # Private chat functionality: Submit media
+    elif chat.type == 'private':
+        # Clean up any previous attempts
+        for key in ['random_target_user_id', 'random_media']:
+            context.user_data.pop(key, None)
+
+        if is_admin(user.id):
+            keyboard = [[InlineKeyboardButton("For myself", callback_data='random_admin_self')], [InlineKeyboardButton("For another user", callback_data='random_admin_other')]]
+            await update.message.reply_text("You're an admin! Are you adding media for yourself or for another user?", reply_markup=InlineKeyboardMarkup(keyboard))
+            return AWAIT_ADMIN_CHOICE
         else:
-            sent_message = await context.bot.send_message(chat_id=chat.id, text="Automatic random risk posting is already disabled for this group.")
-            await schedule_message_deletion(context, sent_message)
+            context.user_data['random_target_user_id'] = user.id
+            await update.message.reply_text("Please send the media (photo, video, or voice note) you want to add to the random pool.\nYou can send up to 4 items one at a time.")
+            return AWAIT_RANDOM_MEDIA
+
+async def random_admin_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles admin's choice of whose media to submit."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == 'random_admin_self':
+        context.user_data['random_target_user_id'] = query.from_user.id
+        await query.edit_message_text("Okay, submitting for yourself. Please send the media now.\nYou can send up to 4 items one at a time.")
+        return AWAIT_RANDOM_MEDIA
+    else: # 'random_admin_other'
+        await query.edit_message_text("Please provide the @username of the user, or forward a message from them so I can identify them.")
+        return AWAIT_TARGET_USER
+
+async def random_receive_target_user_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles admin's input to identify the target user."""
+    message = update.message
+    target_user_id = None
+
+    if message.forward_from:
+        target_user_id = message.forward_from.id
+    elif message.text and message.text.startswith('@'):
+        username_to_find = message.text[1:].lower()
+        risk_data = load_risk_data()
+        for user_id_str, risks in risk_data.items():
+            if any(r.get('username', '').lower() == username_to_find for r in risks):
+                target_user_id = int(user_id_str)
+                break
+
+    if target_user_id:
+        context.user_data['random_target_user_id'] = target_user_id
+        await message.reply_text(f"User identified (ID: {target_user_id}). Please send their media now.\nYou can send up to 4 items one at a time.")
+        return AWAIT_RANDOM_MEDIA
     else:
-        settings[group_id_str] = percentage
-        save_random_risk_settings(settings)
-        sent_message = await context.bot.send_message(chat_id=chat.id, text=f"Automatic random risk chance has been set to {percentage}% for this group. Checks will occur every 30 minutes.")
-        await schedule_message_deletion(context, sent_message)
+        await message.reply_text("I could not identify that user. They may not have any history with me. Please forward one of their messages instead.")
+        return AWAIT_TARGET_USER
+
+async def random_receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles receiving media for the random pool."""
+    message = update.message
+    if 'random_media' not in context.user_data:
+        context.user_data['random_media'] = []
+
+    media_list = context.user_data['random_media']
+    media_type, file_id = None, None
+
+    if message.photo: media_type, file_id = "photo", message.photo[-1].file_id
+    elif message.video: media_type, file_id = "video", message.video.file_id
+    elif message.voice: media_type, file_id = "voice", message.voice.file_id
+
+    if not media_type:
+        await message.reply_text("That's not a valid media type. Please send a photo, video, or voice note.")
+        return AWAIT_RANDOM_MEDIA
+
+    media_list.append({'type': media_type, 'id': file_id})
+
+    if len(media_list) >= 4:
+        await message.reply_text("You have reached the maximum of 4 media items. I will save them now.")
+        return await random_save_media_callback(update, context)
+    else:
+        remaining = 4 - len(media_list)
+        keyboard = [[InlineKeyboardButton("Done", callback_data='random_done_sending')]]
+        await message.reply_text(f"Media received. Send your next item (you have {remaining} left) or click 'Done'.", reply_markup=InlineKeyboardMarkup(keyboard))
+        return AWAIT_RANDOM_MEDIA
+
+async def random_save_media_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Saves all collected media to the risk data file."""
+    query = update.callback_query
+    if query:
+        await query.answer()
+        await query.edit_message_reply_markup(reply_markup=None)
+
+    media_list = context.user_data.get('random_media', [])
+    if not media_list:
+        await context.bot.send_message(update.effective_chat.id, "No media was sent. Operation cancelled.")
+        return ConversationHandler.END
+
+    target_user_id = context.user_data.get('random_target_user_id')
+    # This should always be set, but as a fallback use the person interacting with the bot
+    if not target_user_id:
+        target_user_id = update.effective_user.id
+
+    # We need to fetch the target user's object to get their username
+    try:
+        target_user = await context.bot.get_chat(target_user_id)
+        target_username = target_user.username
+    except Exception:
+        target_username = None # Can't get username if we've never seen them
+
+    risk_data = load_risk_data()
+
+    # These risks are added to the general pool, so they need a group. We'll pick one randomly.
+    # This is a limitation - the user didn't specify a group. We'll pick any available group.
+    admin_data = load_admin_data()
+    all_group_ids = [group for groups in admin_data.values() for group in groups]
+    if not all_group_ids:
+        await context.bot.send_message(update.effective_chat.id, "Error: There are no groups configured for the bot. Cannot save media.")
+        return ConversationHandler.END
+
+    for media_item in media_list:
+        new_risk = {
+            'risk_id': uuid.uuid4().hex, 'user_id': target_user_id, 'username': target_username,
+            'group_id': random.choice(all_group_ids), # Assign to a random group
+            'media_type': media_item['type'], 'file_id': media_item['id'],
+            'risk_failed': True, 'timestamp': int(time.time()), # Mark as failed to make it eligible for /random
+            'posted_message_id': None, 'purged': False,
+            'source': 'random_command' # Add source for future reference
+        }
+        risk_data.setdefault(str(target_user_id), []).append(new_risk)
+
+    save_risk_data(risk_data)
+    await context.bot.send_message(update.effective_chat.id, f"Success! {len(media_list)} media item(s) have been added to the random pool for user {target_user_id}.")
+
+    # Clean up context
+    for key in ['random_target_user_id', 'random_media']:
+        context.user_data.pop(key, None)
+
+    return ConversationHandler.END
 
 
 @command_handler_wrapper(admin_only=True)
@@ -866,10 +990,8 @@ async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_
     if not update.message or not update.message.text:
         return
 
-    # This handler should only be triggered for admins, as per original logic.
-    member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
-    if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-        return  # Silently ignore for non-admins
+    # This handler is now available to all users per user request.
+    # The admin check has been removed.
 
     # Check if the command is addressed to another bot.
     full_command_text = update.message.text[1:].split()[0]
@@ -918,13 +1040,13 @@ async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_
 # =============================
 
 # States for ConversationHandler
-SELECT_GROUP, AWAIT_MEDIA, AWAIT_BEGGING = range(3)
+SELECT_GROUP, AWAIT_MEDIA, AWAIT_SAVE_CONSENT, AWAIT_BEGGING = range(4)
 
 # States for Post ConversationHandler
-SELECT_POST_GROUP, AWAIT_POST_MEDIA, AWAIT_POST_CAPTION, CONFIRM_POST = range(2, 6)
+SELECT_POST_GROUP, AWAIT_POST_MEDIA, AWAIT_POST_CAPTION, CONFIRM_POST = range(4, 8)
 
 # States for Purge ConversationHandler
-CONFIRM_PURGE, AWAIT_CONDITION_VERIFICATION = range(6, 8)
+CONFIRM_PURGE, AWAIT_CONDITION_VERIFICATION = range(8, 10)
 
 
 async def risk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -935,13 +1057,11 @@ async def risk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             text="The /risk command is only available in private chat."
         )
         await schedule_message_deletion(context, sent_message)
-        # Attempt to start a private message instead
         try:
-            sent_message = await context.bot.send_message(
+            await context.bot.send_message(
                 chat_id=update.effective_user.id,
                 text="Please use the /risk command here."
             )
-            await schedule_message_deletion(context, sent_message)
         except Exception:
             pass # Ignore if user has not started a chat with the bot
         return ConversationHandler.END
@@ -958,7 +1078,7 @@ async def risk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     keyboard = []
     for group_id in all_group_ids:
         if 'risk' in disabled_data.get(str(group_id), []):
-            continue  # Skip disabled groups
+            continue
 
         try:
             chat = await context.bot.get_chat(int(group_id))
@@ -972,17 +1092,17 @@ async def risk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         return ConversationHandler.END
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    sent_message = await context.bot.send_message(chat_id=update.effective_chat.id, text="Choose a group where you want to risk your fate:", reply_markup=reply_markup)
-    await schedule_message_deletion(context, sent_message)
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="Choose a group where you want to risk your fate:", reply_markup=reply_markup)
     return SELECT_GROUP
 
 async def select_group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the group selection and asks for media."""
+    """Handles the group selection and asks for the first media."""
     query = update.callback_query
     await query.answer()
 
     group_id = query.data.replace("risk_group_", "")
     context.user_data['risk_group_id'] = group_id
+    context.user_data['risk_media'] = []  # Initialize list to store media
 
     try:
         chat = await context.bot.get_chat(int(group_id))
@@ -990,204 +1110,211 @@ async def select_group_callback(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception:
         group_name = "the selected group"
 
-    await query.edit_message_text(text=f"You have selected '{group_name}'.\n\nPlease send the media (photo, video, or voice note) you want to risk.")
+    await query.edit_message_text(
+        text=f"You have selected '{group_name}'.\n\n"
+             "Please send the media (photo, video, or voice note) you want to risk.\n\n"
+             "<b>Send them one at a time. You can add up to 4.</b>",
+        parse_mode='HTML'
+    )
     return AWAIT_MEDIA
 
 async def receive_media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the media, performs the risk based on new logic, and saves the data."""
-    user = update.effective_user
-    group_id = context.user_data.get('risk_group_id')
-
-    if not group_id:
-        sent_message = await context.bot.send_message(chat_id=update.effective_chat.id, text="Something went wrong. Your group selection was lost. Please start over with /risk.")
-        await schedule_message_deletion(context, sent_message)
-        return ConversationHandler.END
-
+    """Handles receiving media, asking for more, or moving to the next step."""
     message = update.message
-    media_type = None
-    file_id = None
+    media_list = context.user_data.get('risk_media', [])
 
+    media_type, file_id = None, None
     if message.photo:
-        media_type = "photo"
-        file_id = message.photo[-1].file_id
+        media_type, file_id = "photo", message.photo[-1].file_id
     elif message.video:
-        media_type = "video"
-        file_id = message.video.file_id
+        media_type, file_id = "video", message.video.file_id
     elif message.voice:
-        media_type = "voice"
-        file_id = message.voice.file_id
+        media_type, file_id = "voice", message.voice.file_id
 
     if not media_type:
-        sent_message = await context.bot.send_message(chat_id=update.effective_chat.id, text="That's not a valid media type. Please send a photo, video, or voice note.")
-        await schedule_message_deletion(context, sent_message)
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="That's not a valid media type. Please send a photo, video, or voice note.")
         return AWAIT_MEDIA
 
-    # True = Unlucky = Post the media
-    # False = Lucky = Do not post the media (but offer buttons)
-    should_post_automatically = random.choice([True, False])
-    logger.debug(f"Risk check for user {user.id} in group {group_id}. should_post_automatically={should_post_automatically}")
+    media_list.append({'type': media_type, 'id': file_id})
+    context.user_data['risk_media'] = media_list
 
-    risk_data = load_risk_data()
-    risk_id = uuid.uuid4().hex
-
-    # The 'risk_failed' flag now correctly represents the user's perspective:
-    # True means they were unlucky and got posted. False means they were lucky.
-    new_risk = {
-        'risk_id': risk_id,
-        'user_id': user.id,
-        'username': user.username,
-        'group_id': group_id,
-        'media_type': media_type,
-        'file_id': file_id,
-        'risk_failed': should_post_automatically,
-        'timestamp': int(time.time()),
-        'posted_message_id': None,
-        'purged': False
-    }
-
-    if should_post_automatically:
-        # UNLUCKY CASE: Post automatically
-        logger.debug(f"User {user.id} was unlucky. Automatically posting media to group {group_id}.")
-        user_mention = user.mention_html()
-        caption = f"{user_mention} decided to risk fate and failed miserably! 😈"
-
-        posted_message = None
-        try:
-            if media_type == 'photo':
-                posted_message = await context.bot.send_photo(group_id, file_id, caption=caption, parse_mode='HTML')
-            elif media_type == 'video':
-                posted_message = await context.bot.send_video(group_id, file_id, caption=caption, parse_mode='HTML')
-            elif media_type == 'voice':
-                posted_message = await context.bot.send_voice(group_id, file_id, caption=caption, parse_mode='HTML')
-
-            if posted_message:
-                new_risk['posted_message_id'] = posted_message.message_id
-                await schedule_message_deletion(context, posted_message)
-                sent_message = await context.bot.send_message(chat_id=update.effective_chat.id, text="You were unlucky! Your media has been posted.")
-                await schedule_message_deletion(context, sent_message)
-            else:
-                # This case should be rare, but handle it.
-                sent_message = await context.bot.send_message(chat_id=update.effective_chat.id, text="You were unlucky... but I failed to post your media. Your secret is safe for now.")
-                await schedule_message_deletion(context, sent_message)
-
-        except Exception as e:
-            logger.error(f"Failed to automatically post risk {risk_id} for user {user.id}: {e}")
-            await _notify_admins_of_failed_post(context, group_id, user.id, str(e))
-            sent_message = await context.bot.send_message(chat_id=update.effective_chat.id, text="You were unlucky... but I couldn't post your media. Perhaps my permissions in the group have changed.")
-            await schedule_message_deletion(context, sent_message)
-
-        # Save data and end conversation
-        risk_data.setdefault(str(user.id), []).append(new_risk)
-        save_risk_data(risk_data)
-        context.user_data.pop('risk_group_id', None)
-        return ConversationHandler.END
-
+    if len(media_list) >= 4:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="You have reached the maximum of 4 media items.")
+        return await _ask_for_save_consent(update, context)
     else:
-        # LUCKY CASE: Don't post, but show buttons
-        logger.debug(f"User {user.id} was lucky. Preparing to send 'beg' buttons.")
-        context.user_data['risk_id_to_beg_for'] = risk_id
-
-        # Save the risk data now, even if not posted yet
-        risk_data.setdefault(str(user.id), []).append(new_risk)
-        save_risk_data(risk_data)
-
-        keyboard = [
-            [InlineKeyboardButton("Please post me anyway Sir 🙏", callback_data='beg_post_yes')],
-            [InlineKeyboardButton("Thanks Sir", callback_data='beg_post_no')]
-        ]
+        remaining = 4 - len(media_list)
+        keyboard = [[InlineKeyboardButton("Done", callback_data='risk_done_sending')]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-
-        sent_message = await context.bot.send_message(
+        await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=f"You were lucky! Your {media_type} will not be posted... this time.\n"
-                 "Unless you want to beg me to post it anyway? 😉",
+            text=f"Media received. Please send your next media now (you have {remaining} left). Click 'Done' if you don't want to add more.",
             reply_markup=reply_markup
         )
-        await schedule_message_deletion(context, sent_message)
-        return AWAIT_BEGGING
+        return AWAIT_MEDIA
 
-async def beg_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the user's decision to beg for a failed risk to be posted."""
+async def done_sending_media_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the 'Done' button, moving to the consent step."""
     query = update.callback_query
     await query.answer()
 
+    if not context.user_data.get('risk_media'):
+        await query.edit_message_text(text="You haven't sent any media. Operation cancelled.")
+        return ConversationHandler.END
+
+    await query.edit_message_reply_markup(reply_markup=None)
+    return await _ask_for_save_consent(update, context)
+
+async def _ask_for_save_consent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Helper function to ask for user consent to save media."""
+    keyboard = [
+        [InlineKeyboardButton("✅ Save me", callback_data='risk_save_consent_yes')],
+        [InlineKeyboardButton("❌ Don't save me", callback_data='risk_save_consent_no')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    chat_id = update.effective_chat.id
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="Before we roll the dice, do you consent to having your media saved for future random posts by me or admins?\n\n"
+             "If you choose 'Don't save me', this risk will be a one-time event.",
+        reply_markup=reply_markup
+    )
+    return AWAIT_SAVE_CONSENT
+
+async def save_consent_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the consent decision and proceeds with the risk logic for the batch."""
+    query = update.callback_query
+    await query.answer()
+
+    decision = query.data
+    context.user_data['allow_random'] = (decision == 'risk_save_consent_yes')
+
+    if context.user_data['allow_random']:
+        await query.edit_message_text("You got it. Your media will be saved for future fun. Now, let's see what fate has in store for you...")
+    else:
+        await query.edit_message_text("Your secret is safe with me. This risk will be a one-time thing. Now, let's see what fate has in store for you...")
+
+    user = update.effective_user
+    group_id = context.user_data.get('risk_group_id')
+    media_list = context.user_data.get('risk_media', [])
+    allow_random = context.user_data.get('allow_random')
+
+    risk_data = load_risk_data()
+    unlucky_risks, lucky_risks = [], []
+
+    for media_item in media_list:
+        should_post = random.choice([True, False])
+        new_risk = {
+            'risk_id': uuid.uuid4().hex, 'user_id': user.id, 'username': user.username,
+            'group_id': group_id, 'media_type': media_item['type'], 'file_id': media_item['id'],
+            'risk_failed': should_post, 'timestamp': int(time.time()),
+            'posted_message_id': None, 'purged': not allow_random
+        }
+        risk_data.setdefault(str(user.id), []).append(new_risk)
+        (unlucky_risks if should_post else lucky_risks).append(new_risk)
+
+    posted_count = 0
+    if unlucky_risks:
+        user_mention = user.mention_html()
+        caption = f"{user_mention} decided to risk fate and failed miserably! 😈"
+        for risk in unlucky_risks:
+            try:
+                posted_message = None
+                if risk['media_type'] == 'photo':
+                    posted_message = await context.bot.send_photo(group_id, risk['file_id'], caption=caption, parse_mode='HTML')
+                elif risk['media_type'] == 'video':
+                    posted_message = await context.bot.send_video(group_id, risk['file_id'], caption=caption, parse_mode='HTML')
+                elif risk['media_type'] == 'voice':
+                    posted_message = await context.bot.send_voice(group_id, risk['file_id'], caption=caption, parse_mode='HTML')
+
+                if posted_message:
+                    risk['posted_message_id'] = posted_message.message_id
+                    posted_count += 1
+            except Exception as e:
+                logger.error(f"Failed to post an unlucky risk {risk['risk_id']}: {e}")
+                await _notify_admins_of_failed_post(context, group_id, user.id, str(e))
+
+    save_risk_data(risk_data)
+
+    summary_parts = []
+    if unlucky_risks:
+        summary_parts.append(f"You were unlucky with {len(unlucky_risks)} item(s)! {posted_count} of them have been posted.")
+    if lucky_risks:
+        summary_parts.append(f"You were lucky with {len(lucky_risks)} item(s). They have not been posted.")
+        context.user_data['risk_ids_to_beg_for'] = [r['risk_id'] for r in lucky_risks]
+
+        keyboard = [[InlineKeyboardButton("Please post them anyway Sir 🙏", callback_data='beg_post_yes')], [InlineKeyboardButton("Thanks Sir", callback_data='beg_post_no')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await context.bot.send_message(chat_id=user.id, text="\n".join(summary_parts) + "\n\nUnless you want to beg me to post the lucky ones anyway? 😉", reply_markup=reply_markup)
+        return AWAIT_BEGGING
+
+    await context.bot.send_message(chat_id=user.id, text="\n".join(summary_parts))
+    for key in ['risk_group_id', 'risk_media', 'allow_random']:
+        context.user_data.pop(key, None)
+    return ConversationHandler.END
+
+async def beg_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the user's decision to beg for lucky risks to be posted."""
+    query = update.callback_query
+    await query.answer()
     user_id = query.from_user.id
     decision = query.data
 
-    # Clean up the buttons from the original message
     await query.edit_message_reply_markup(reply_markup=None)
 
     if decision == 'beg_post_no':
-        await query.edit_message_text("As you wish. Your secret is safe... for now.")
+        await query.edit_message_text("As you wish. Your secrets are safe... for now.")
     elif decision == 'beg_post_yes':
-        risk_id_to_post = context.user_data.get('risk_id_to_beg_for')
-        if not risk_id_to_post:
-            await query.edit_message_text("I seem to have lost the details of your risk. Please start over with /risk.")
-            # End of conversation cleanup will happen finally
+        risk_ids_to_post = context.user_data.get('risk_ids_to_beg_for', [])
+        if not risk_ids_to_post:
+            await query.edit_message_text("I seem to have lost the details of your risk. Please start over.")
             return ConversationHandler.END
 
+        await query.edit_message_text("You begged well enough. Posting your media now...")
         risk_data = load_risk_data()
         user_risks = risk_data.get(str(user_id), [])
-        target_risk = next((r for r in user_risks if r['risk_id'] == risk_id_to_post), None)
-
-        if not target_risk:
-            await query.edit_message_text("An error occurred: I could not find the risk data to post.")
-            return ConversationHandler.END
 
         user_mention = query.from_user.mention_html()
         caption = f"{user_mention} BEGGED me to be posted without mercy 😈"
 
-        try:
-            media_type = target_risk['media_type']
-            file_id = target_risk['file_id']
-            group_id = target_risk['group_id']
+        for risk_id in risk_ids_to_post:
+            target_risk = next((r for r in user_risks if r['risk_id'] == risk_id), None)
+            if not target_risk: continue
 
-            posted_message = None
-            if media_type == 'photo':
-                posted_message = await context.bot.send_photo(group_id, file_id, caption=caption, parse_mode='HTML')
-            elif media_type == 'video':
-                posted_message = await context.bot.send_video(group_id, file_id, caption=caption, parse_mode='HTML')
-            elif media_type == 'voice':
-                posted_message = await context.bot.send_voice(group_id, file_id, caption=caption, parse_mode='HTML')
+            try:
+                posted_message = None
+                if target_risk['media_type'] == 'photo':
+                    posted_message = await context.bot.send_photo(target_risk['group_id'], target_risk['file_id'], caption=caption, parse_mode='HTML')
+                elif target_risk['media_type'] == 'video':
+                    posted_message = await context.bot.send_video(target_risk['group_id'], target_risk['file_id'], caption=caption, parse_mode='HTML')
+                elif target_risk['media_type'] == 'voice':
+                    posted_message = await context.bot.send_voice(target_risk['group_id'], target_risk['file_id'], caption=caption, parse_mode='HTML')
 
-            if posted_message:
-                target_risk['posted_message_id'] = posted_message.message_id
-                save_risk_data(risk_data)
-                await schedule_message_deletion(context, posted_message)
+                if posted_message:
+                    target_risk['posted_message_id'] = posted_message.message_id
+            except Exception as e:
+                logger.error(f"Failed to post begged risk {risk_id} for user {user_id}: {e}")
 
-            await query.edit_message_text("You begged well enough. Your media has been posted.")
+        save_risk_data(risk_data)
 
-        except Exception as e:
-            logger.error(f"Failed to post begged risk {risk_id_to_post} for user {user_id}: {e}")
-            await query.edit_message_text("I couldn't post your media. Perhaps my permissions in the group have changed.")
-
-    # Clean up user_data for this conversation
-    if 'risk_group_id' in context.user_data:
-        del context.user_data['risk_group_id']
-    if 'risk_id_to_beg_for' in context.user_data:
-        del context.user_data['risk_id_to_beg_for']
-
+    for key in ['risk_group_id', 'risk_media', 'allow_random', 'risk_ids_to_beg_for']:
+        context.user_data.pop(key, None)
     return ConversationHandler.END
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Cancels and ends the current conversation (risk or post)."""
     message_to_send = "Operation cancelled."
 
-    # Check for risk conversation state
-    if 'risk_group_id' in context.user_data:
-        context.user_data.pop('risk_group_id', None)
-        message_to_send = "The risk has been cancelled."
+    # Clean up all possible keys from different conversations
+    conv_keys = [
+        'risk_group_id', 'risk_media', 'allow_random', 'risk_ids_to_beg_for',
+        'post_group_id', 'post_media_type', 'post_file_id', 'post_caption'
+    ]
+    for key in conv_keys:
+        context.user_data.pop(key, None)
 
-    # Check for post conversation state
-    elif 'post_group_id' in context.user_data:
-        for key in ['post_group_id', 'post_media_type', 'post_file_id', 'post_caption']:
-            context.user_data.pop(key, None)
-        message_to_send = "The post creation process has been cancelled."
-
-    sent_message = await context.bot.send_message(chat_id=update.effective_chat.id, text=message_to_send)
-    await schedule_message_deletion(context, sent_message)
-
-    # End the conversation
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=message_to_send)
     return ConversationHandler.END
 
 # =============================
@@ -1274,6 +1401,9 @@ async def seerisk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not risk.get('purged', False):
             taunt_callback_data = f"posttaunt_{risk['user_id']}_{risk['risk_id']}"
             keyboard.append([InlineKeyboardButton("Post with Taunt", callback_data=taunt_callback_data)])
+            # Add the new purge button here
+            purge_callback_data = f"purgenow_{risk['user_id']}_{risk['risk_id']}"
+            keyboard.append([InlineKeyboardButton("🚨 Purge 🚨", callback_data=purge_callback_data)])
 
         reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
 
@@ -1442,6 +1572,82 @@ async def post_risk_with_taunt_callback(update: Update, context: ContextTypes.DE
 # =============================
 # Purge Command (Big Red Button)
 # =============================
+
+async def purge_risk_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Asks for confirmation before purging a single risk from the /seerisk view."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        _, user_id, risk_id = query.data.split('_')
+    except ValueError:
+        await query.edit_message_caption(caption=query.message.caption + "\n\nError: Invalid callback data.", reply_markup=None)
+        return
+
+    keyboard = [
+        [
+            InlineKeyboardButton("YES, I am sure", callback_data=f"purgeconfirm_{user_id}_{risk_id}"),
+            InlineKeyboardButton("NO, Cancel", callback_data=f"purgecancel_{user_id}_{risk_id}")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # Append a warning to the existing caption if not already there
+    new_caption = query.message.caption
+    warning_text = "\n\n<b>⚠️ Are you sure you want to purge this risk? This is irreversible.</b>"
+    if warning_text not in new_caption:
+        new_caption += warning_text
+
+    await query.edit_message_caption(
+        caption=new_caption,
+        parse_mode='HTML',
+        reply_markup=reply_markup
+    )
+
+async def purge_risk_confirmation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the final confirmation of purging a single risk from the /seerisk view."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        action, user_id, risk_id = query.data.split('_')
+    except ValueError:
+        await query.edit_message_caption(caption=query.message.caption + "\n\nError: Invalid callback data.", reply_markup=None)
+        return
+
+    # Remove the warning text from the caption for a cleaner final message
+    original_caption = query.message.caption.split('\n\n')[0]
+
+    if action == "purgeconfirm":
+        risk_data = load_risk_data()
+        user_risks = risk_data.get(user_id, [])
+        risk_to_purge = next((r for r in user_risks if r['risk_id'] == risk_id), None)
+
+        if not risk_to_purge:
+            await query.edit_message_caption(caption=original_caption + "\n\nError: Risk not found or already handled.", reply_markup=None)
+            return
+
+        await _delete_and_mark_risks([risk_to_purge], context)
+
+        # Rebuild the caption to show purged status
+        lines = original_caption.split('\n')
+        for i, line in enumerate(lines):
+            if line.startswith("Status:"):
+                # Replace the old status with a clear "Purged" status
+                lines[i] = "Status: Purged by admin"
+                break
+
+        final_caption = '\n'.join(lines)
+        if " [PURGED]" not in final_caption: # Add a final marker
+             final_caption += " [PURGED]"
+
+        await query.edit_message_caption(caption=final_caption, reply_markup=None)
+        sent_message = await context.bot.send_message(chat_id=query.message.chat_id, text=f"Risk {risk_id} has been purged.")
+        await schedule_message_deletion(context, sent_message)
+
+    elif action == "purgecancel":
+        await query.edit_message_caption(caption=original_caption + "\n\nPurge cancelled.", reply_markup=None)
+
 
 async def _delete_and_mark_risks(risks_to_process: list, context: ContextTypes.DEFAULT_TYPE) -> tuple[int, int]:
     """
@@ -1995,7 +2201,7 @@ COMMAND_MAP = {
     'start': {'is_admin': False}, 'help': {'is_admin': False}, 'beowned': {'is_admin': False},
     'command': {'is_admin': False}, 'disable': {'is_admin': True}, 'admin': {'is_admin': False},
     'link': {'is_admin': False}, 'inactive': {'is_admin': True}, 'post': {'is_admin': True},
-    'setnickname': {'is_admin': True}, 'removenickname': {'is_admin': True}, 'allban': {'is_admin': True}, 'random': {'is_admin': True},
+'setnickname': {'is_admin': True}, 'removenickname': {'is_admin': True}, 'allban': {'is_admin': True}, 'random': {'is_admin': False},
     'enable': {'is_admin': True}, 'update': {'is_admin': True}, 'risk': {'is_admin': False},
     'seerisk': {'is_admin': True}, 'purge': {'is_admin': False}, 'timer': {'is_admin': True}, 'notimer': {'is_admin': True},
     'addcondition': {'is_admin': True}, 'listconditions': {'is_admin': True}, 'removecondition': {'is_admin': True},
@@ -2039,15 +2245,14 @@ async def command_list_command(update: Update, context: ContextTypes.DEFAULT_TYP
             elif is_admin_user:  # Admins also see disabled everyone commands
                 everyone_cmds.append(display_cmd)
 
-    # Dynamic hashtag commands (always admin-only)
-    if is_admin_user:
-        hashtag_data = load_hashtag_data()
-        for tag in sorted(hashtag_data.keys()):
-            admin_only_cmds.append(f"/{tag}")
+    # Dynamic hashtag commands (now for everyone)
+    hashtag_data = load_hashtag_data()
+    for tag in sorted(hashtag_data.keys()):
+        everyone_cmds.append(f"/{tag}")
 
-    msg = '<b>Commands for everyone:</b>\n' + ('\n'.join(everyone_cmds) if everyone_cmds else 'None')
+    msg = '<b>Commands for everyone:</b>\n' + ('\n'.join(sorted(everyone_cmds)) if everyone_cmds else 'None')
     if is_admin_user:
-        msg += '\n\n<b>Commands for admins only:</b>\n' + ('\n'.join(admin_only_cmds) if admin_only_cmds else 'None')
+        msg += '\n\n<b>Commands for admins only:</b>\n' + ('\n'.join(sorted(admin_only_cmds)) if admin_only_cmds else 'None')
 
     sent_message = await context.bot.send_message(chat_id=update.effective_chat.id, text=msg, parse_mode='HTML')
     await schedule_message_deletion(context, sent_message)
@@ -2453,8 +2658,9 @@ async def help_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - /link: Generates a single-use invite link for the group.
 - /beowned: Information on how to be owned.
 - /admin: Request help from admins in a group.
-- /risk: Take a risk and let fate decide if your media gets posted. (Private chat only)
+- /risk: Take a risk with up to 4 media items and let fate decide if they get posted. (Private chat only)
 - /purge: Marks your posted risks as 'purged', hiding them from /random and /taunt. (Private chat only)
+- /random: Submit up to 4 media items to the random pool for future posts. (Private chat only)
 - /cancel: Cancels an ongoing operation like /risk or /post.
         """
     elif topic == 'help_admin':
@@ -2480,11 +2686,12 @@ async def help_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - /removenickname &lt;user&gt;: Removes a user's nickname.
 
 <u>Risk & History</u>
-- /seerisk &lt;user_id or @username&gt;: View the risk history of a specific user. Purged risks will be marked.
-- /random &lt;percentage&gt;: Sets the percentage chance (0-100) for a random, non-purged risk to be posted automatically every 30 minutes. Use 0 to disable.
+- /seerisk &lt;user_id or @username&gt;: View the risk history of a specific user, including submissions from /random. Purged risks will be marked.
+- /random &lt;percentage&gt;: In a group, sets the percentage chance (0-100) for a random, non-purged risk to be posted.
+- /random: In a private chat, submit media to the random pool for yourself or another user.
 - /purge &lt;user_id or @username&gt;: Mark all of a user's risks as purged across all groups. This ignores group conditions but respects if /purge is disabled in a group.
 
-<u>Purge Conditions (Owner-only)</u>
+<u>Purge Conditions (Admin-only)</u>
 - /addcondition &lt;condition&gt;: Adds a condition that users must meet to use /purge.
 - /listconditions: Lists all current purge conditions with their IDs.
 - /removecondition &lt;id&gt;: Removes a purge condition by its ID.
@@ -2800,7 +3007,11 @@ if __name__ == '__main__':
         entry_points=[CommandHandler('risk', risk_command)],
         states={
             SELECT_GROUP: [CallbackQueryHandler(select_group_callback, pattern='^risk_group_')],
-            AWAIT_MEDIA: [MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE, receive_media_handler)],
+            AWAIT_MEDIA: [
+                MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE, receive_media_handler),
+                CallbackQueryHandler(done_sending_media_callback, pattern='^risk_done_sending$')
+            ],
+            AWAIT_SAVE_CONSENT: [CallbackQueryHandler(save_consent_callback, pattern='^risk_save_consent_')],
             AWAIT_BEGGING: [CallbackQueryHandler(beg_callback_handler, pattern='^beg_post_')],
         },
         fallbacks=[CommandHandler('cancel', cancel_command)],
@@ -2837,6 +3048,22 @@ if __name__ == '__main__':
     )
     app.add_handler(purge_conv_handler)
 
+    random_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('random', random_command)],
+        states={
+            AWAIT_ADMIN_CHOICE: [CallbackQueryHandler(random_admin_choice_callback, pattern='^random_admin_')],
+            AWAIT_TARGET_USER: [MessageHandler(filters.TEXT | filters.FORWARDED, random_receive_target_user_handler)],
+            AWAIT_RANDOM_MEDIA: [
+                MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE, random_receive_media_handler),
+                CallbackQueryHandler(random_save_media_callback, pattern='^random_done_sending$')
+            ],
+        },
+        fallbacks=[CommandHandler('cancel', cancel_command)],
+        per_message=False,
+        per_user=True
+    )
+    app.add_handler(random_conv_handler)
+
     # Register all commands using the new helper
     add_command(app, 'cancel', cancel_command)
     add_command(app, 'start', start_command)
@@ -2850,7 +3077,7 @@ if __name__ == '__main__':
     add_command(app, 'setnickname', setnickname_command)
     add_command(app, 'removenickname', removenickname_command)
     add_command(app, 'allban', allban_command)
-    add_command(app, 'random', random_command)
+    # add_command(app, 'random', random_command) # Now handled by ConversationHandler
     add_command(app, 'addcondition', addcondition_command)
     add_command(app, 'listconditions', listconditions_command)
     add_command(app, 'removecondition', removecondition_command)
@@ -2859,13 +3086,15 @@ if __name__ == '__main__':
     add_command(app, 'seerisk', seerisk_command)
     add_command(app, 'timer', timer_command)
     add_command(app, 'notimer', notimer_command)
-    add_command(app, 'risk', risk_command)
-    add_command(app, 'post', post_command)
-    add_command(app, 'purge', purge_command)
+    # add_command(app, 'risk', risk_command) # Now handled by ConversationHandler
+    # add_command(app, 'post', post_command) # Now handled by ConversationHandler
+    # add_command(app, 'purge', purge_command) # Now handled by ConversationHandler
 
     app.add_handler(CallbackQueryHandler(help_menu_handler, pattern=r'^help_'))
     app.add_handler(CallbackQueryHandler(post_risk_callback, pattern=r'^postrisk_'))
     app.add_handler(CallbackQueryHandler(post_risk_with_taunt_callback, pattern=r'^posttaunt_'))
+    app.add_handler(CallbackQueryHandler(purge_risk_callback, pattern=r'^purgenow_'))
+    app.add_handler(CallbackQueryHandler(purge_risk_confirmation_callback, pattern=r'^purge(confirm|cancel)_'))
     app.add_handler(CallbackQueryHandler(purge_verification_callback, pattern=r'^purge_verify_'))
 
     # Fallback handler for dynamic hashtag commands.
