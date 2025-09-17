@@ -1385,14 +1385,31 @@ async def seerisk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await schedule_message_deletion(context, sent_message)
 
     for risk in user_risks:
+        logger.info(f"Processing risk for /seerisk: {risk}")
+
+        # Robustly access data to prevent KeyErrors from crashing the loop
+        media_type = risk.get('media_type')
+        file_id = risk.get('file_id')
+        timestamp = risk.get('timestamp')
+        group_id = risk.get('group_id')
+        risk_id = risk.get('risk_id', 'N/A')
+
+        if not all([media_type, file_id, timestamp, group_id]):
+            logger.error(f"Corrupted or incomplete risk data found: {risk}")
+            await context.bot.send_message(
+                update.effective_chat.id,
+                text=f"Skipping a corrupted risk entry (ID: {risk_id}). It might be missing essential data like media type, file ID, or group ID."
+            )
+            continue
+
         try:
-            group_chat = await context.bot.get_chat(int(risk['group_id']))
+            group_chat = await context.bot.get_chat(int(group_id))
             group_name = group_chat.title
         except Exception:
-            group_name = f"ID {risk['group_id']}"
+            group_name = f"ID {group_id}"
 
         from datetime import datetime
-        ts = datetime.fromtimestamp(risk['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
+        ts = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
 
         # Compatibility for old data: check for 'risk_failed' first, then fall back to 'posted'
         risk_failed_flag = risk.get('risk_failed', risk.get('posted'))
@@ -1413,21 +1430,18 @@ async def seerisk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = []
         # Allow posting only if the risk was failed and it's not already posted.
         if risk_failed_flag and not risk.get('posted_message_id') and not risk.get('purged', False):
-            callback_data = f"postrisk_{risk['user_id']}_{risk['risk_id']}"
+            callback_data = f"postrisk_{risk['user_id']}_{risk_id}"
             keyboard.append([InlineKeyboardButton("Post Now", callback_data=callback_data)])
 
         # Add "Post with Taunt" button only if the risk is not purged.
         if not risk.get('purged', False):
-            taunt_callback_data = f"posttaunt_{risk['user_id']}_{risk['risk_id']}"
+            taunt_callback_data = f"posttaunt_{risk['user_id']}_{risk_id}"
             keyboard.append([InlineKeyboardButton("Post with Taunt", callback_data=taunt_callback_data)])
             # Add the new purge button here
-            purge_callback_data = f"purgenow_{risk['user_id']}_{risk['risk_id']}"
+            purge_callback_data = f"purgenow_{risk['user_id']}_{risk_id}"
             keyboard.append([InlineKeyboardButton("🚨 Purge 🚨", callback_data=purge_callback_data)])
 
         reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
-
-        media_type = risk['media_type']
-        file_id = risk['file_id']
 
         try:
             sent_message = None
