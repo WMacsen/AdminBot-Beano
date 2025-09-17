@@ -1198,7 +1198,7 @@ async def _ask_for_save_consent(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def _post_risk_batch(risks_to_post: list, caption: str, group_id: str, context: ContextTypes.DEFAULT_TYPE) -> list[Message]:
     """Helper function to post a batch of risks, grouping media where possible."""
-    posted_messages: list[Message] = []
+    posted_messages_list = []
     photos_and_videos = [r for r in risks_to_post if r['media_type'] in ['photo', 'video']]
     other_media = [r for r in risks_to_post if r['media_type'] not in ['photo', 'video']]
 
@@ -1214,9 +1214,8 @@ async def _post_risk_batch(risks_to_post: list, caption: str, group_id: str, con
                     input_media_group.append(InputMediaVideo(media=risk['file_id'], caption=item_caption, parse_mode='HTML'))
 
             if input_media_group:
-                # send_media_group returns a list of Message objects
-                messages = await context.bot.send_media_group(chat_id=group_id, media=input_media_group)
-                posted_messages.extend(messages)
+                posted_messages = await context.bot.send_media_group(chat_id=group_id, media=input_media_group)
+                posted_messages_list.extend(posted_messages)
 
         # Post other media types individually
         for risk in other_media:
@@ -1225,13 +1224,13 @@ async def _post_risk_batch(risks_to_post: list, caption: str, group_id: str, con
                 posted_message = await context.bot.send_voice(group_id, risk['file_id'], caption=caption, parse_mode='HTML')
 
             if posted_message:
-                posted_messages.append(posted_message)
+                posted_messages_list.append(posted_message)
 
     except Exception as e:
         logger.error(f"Failed to post media batch to group {group_id}: {e}")
         await _notify_admins_of_failed_post(context, group_id, risks_to_post[0]['user_id'], str(e))
 
-    return posted_messages
+    return posted_messages_list
 
 async def save_consent_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handles the consent decision and proceeds with the risk logic for the batch."""
@@ -1260,14 +1259,11 @@ async def save_consent_callback(update: Update, context: ContextTypes.DEFAULT_TY
             'posted_message_ids': [], 'purged': not allow_random
         })
 
-    posted_messages: list[Message] = []
+    posted_ids = []
     if should_post:
         caption = f"{user.mention_html()} decided to risk fate and failed miserably! 😈"
-        posted_messages = await _post_risk_batch(new_risks_batch, caption, group_id, context)
-        for msg in posted_messages:
-            await schedule_message_deletion(context, msg)
+        posted_ids = await _post_risk_batch(new_risks_batch, caption, group_id, context)
 
-    posted_ids = [msg.message_id for msg in posted_messages]
     for risk in new_risks_batch:
         risk['posted_message_ids'] = posted_ids
         risk['posted_message_id'] = posted_ids[0] if posted_ids else None
@@ -1311,15 +1307,15 @@ async def beg_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         group_id = risks_to_post[0]['group_id']
         caption = f"{query.from_user.mention_html()} BEGGED me to be posted without mercy 😈"
         posted_messages = await _post_risk_batch(risks_to_post, caption, group_id, context)
-        for msg in posted_messages:
-            await schedule_message_deletion(context, msg)
 
-        posted_ids = [msg.message_id for msg in posted_messages]
-        if posted_ids:
+        if posted_messages:
+            posted_ids = [msg.message_id for msg in posted_messages]
             for risk in risks_to_post:
                 risk['posted_message_ids'] = posted_ids
                 risk['posted_message_id'] = posted_ids[0]
             save_risk_data(risk_data)
+            for msg in posted_messages:
+                await schedule_message_deletion(context, msg)
 
     for key in ['risk_group_id', 'risk_media', 'allow_random', 'risk_ids_to_beg_for']:
         context.user_data.pop(key, None)
@@ -1441,6 +1437,9 @@ async def seerisk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 sent_message = await context.bot.send_video(update.effective_chat.id, file_id, caption=caption, reply_markup=reply_markup)
             elif media_type == 'voice':
                 sent_message = await context.bot.send_voice(update.effective_chat.id, file_id, caption=caption, reply_markup=reply_markup)
+            else:
+                logger.warning(f"Unhandled media type '{media_type}' for risk {risk['risk_id']}")
+                sent_message = await context.bot.send_message(update.effective_chat.id, text=f"Cannot display risk from {ts}. Unhandled media type: {media_type}")
 
             # If a message was sent and it had buttons, record it for later editing.
             if sent_message and reply_markup:
@@ -1572,8 +1571,8 @@ async def post_risk_with_taunt_callback(update: Update, context: ContextTypes.DE
 
         if posted_message:
             target_risk['posted_message_id'] = posted_message.message_id
-            await schedule_message_deletion(context, posted_message)
             save_risk_data(risk_data)
+            await schedule_message_deletion(context, posted_message)
 
         sent_message = await context.bot.send_message(chat_id=query.message.chat_id, text="Media has been posted to the group with a taunt.")
         await schedule_message_deletion(context, sent_message)
@@ -2180,35 +2179,35 @@ async def post_confirmation_callback(update: Update, context: ContextTypes.DEFAU
             return ConversationHandler.END
 
         try:
-            group_message = None
+            posted_message = None
             if media_type == 'photo':
-                group_message = await context.bot.send_photo(group_id, file_id, caption=caption)
+                posted_message = await context.bot.send_photo(group_id, file_id, caption=caption)
             elif media_type == 'video':
-                group_message = await context.bot.send_video(group_id, file_id, caption=caption)
+                posted_message = await context.bot.send_video(group_id, file_id, caption=caption)
 
-            if group_message:
-                await schedule_message_deletion(context, group_message)
+            if posted_message:
+                await schedule_message_deletion(context, posted_message)
 
             # Send a new message as confirmation
-            confirmation_message = await context.bot.send_message(
+            sent_message = await context.bot.send_message(
                 chat_id=query.message.chat_id,
                 text="✅ Your post has been sent successfully!"
             )
-            await schedule_message_deletion(context, confirmation_message)
+            await schedule_message_deletion(context, sent_message)
         except Exception as e:
             logger.error(f"Failed to send post to group {group_id}: {e}")
-            error_message = await context.bot.send_message(
+            sent_message = await context.bot.send_message(
                 chat_id=query.message.chat_id,
                 text=f"An error occurred while trying to post. I might not have the right permissions in the target group.\nError: {e}"
             )
-            await schedule_message_deletion(context, error_message)
+            await schedule_message_deletion(context, sent_message)
 
     elif query.data == 'post_cancel':
-        confirmation_message = await context.bot.send_message(
+        sent_message = await context.bot.send_message(
             chat_id=query.message.chat_id,
             text="Post cancelled."
         )
-        await schedule_message_deletion(context, confirmation_message)
+        await schedule_message_deletion(context, sent_message)
 
     # Clean up user_data
     for key in ['post_group_id', 'post_media_type', 'post_file_id', 'post_caption']:
@@ -2708,19 +2707,17 @@ async def help_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - /purge: Marks your posted risks as 'purged', hiding them from /random and /taunt. (Private chat only)
 - /random: Submit up to 4 media items to the random pool for future posts. (Private chat only)
 - /cancel: Cancels an ongoing operation like /risk or /post.
-        """
+"""
     elif topic == 'help_dynamic':
         text = """
 <b>Dynamic Commands</b>
 
-Dynamic commands are created by users in a group by posting a message with a hashtag (e.g., `#mycommand`).
-This creates a command `/mycommand` that anyone in that group can use to repost the original message/media.
+Dynamic commands are custom, group-specific commands created by users. They are made by posting a message with a hashtag (e.g., `#mycommand`).
 
-These commands are group-specific, meaning a command created in one group will not work in another.
+Once created, anyone in that group can use `/#mycommand` to have the bot post the saved content.
 
-To see a list of all dynamic commands available in a specific group, use the `/command` command within that group.
-
-Admins can remove a dynamic command in a group by using `/disable <command>`.
+- To see a list of all dynamic commands available in a group, use the `/command` command within that group.
+- Admins can remove a dynamic command from their group using `/disable #mycommand` in the group.
 """
     elif topic == 'help_admin':
         if not is_admin(user_id):
@@ -2935,8 +2932,6 @@ async def periodic_random_risk_check(context: ContextTypes.DEFAULT_TYPE):
     """
     logger.debug("Running periodic random risk check...")
     settings = load_random_risk_settings()
-    timer_settings = load_timer_settings()
-    logger.debug(f"Loaded timer settings for periodic check: {timer_settings}")
 
     for group_id_str, percentage in settings.items():
         if not (isinstance(percentage, (int, float)) and 0 < percentage <= 100):
@@ -2981,8 +2976,6 @@ async def periodic_random_risk_check(context: ContextTypes.DEFAULT_TYPE):
                     sent_message = await context.bot.send_voice(group_id_str, file_id, caption=caption, parse_mode='HTML')
 
                 if sent_message:
-                    group_timer_minutes = timer_settings.get(group_id_str)
-                    logger.debug(f"Checking timer for group {group_id_str}. Timer value: {group_timer_minutes} minutes.")
                     await schedule_message_deletion(context, sent_message)
 
                 logger.info(f"Successfully posted random risk {target_risk.get('risk_id')} in group {group_id_str}.")
